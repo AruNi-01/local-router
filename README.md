@@ -1,5 +1,19 @@
 # LocalRouter
 
+## Why LocalRouter
+
+Local development breaks down as projects get larger:
+
+- every service wants its own port, and those ports collide
+- URLs keep changing across restarts, branches, and workspaces
+- the same project opened in multiple git worktrees collides on local ports and "which branch is live" becomes unclear
+- frontend, API, docs, workers, and desktop apps are mixed in one repo but have different runtime needs
+- process state, logs, routes, and health are split across terminals, browser tabs, and ad-hoc scripts
+
+LocalRouter exists to make that environment predictable.
+
+It gives each runnable service a supervised local runtime, a stable routed URL, and a single control plane shared by the daemon, dashboard, and CLI. Instead of asking developers to remember which app is on which port today, or which worktree currently owns a branch-specific dev server, LocalRouter allocates an internal port, keeps the public route stable, proxies requests for you, and reports the actual runtime state in one place.
+
 LocalRouter is a local control plane for development services.
 
 It runs a local daemon, supervises project processes, assigns stable local routes, and exposes the same state to both a dashboard and a CLI.
