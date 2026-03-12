@@ -1,0 +1,32 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      - release
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking-change
+    - title: Features
+      labels:
+        - feat
+        - feature
+    - title: Fixes
+      labels:
+        - fix
+        - bug
+    - title: UI and UX
+      labels:
+        - ui
+        - ux
+    - title: Tooling and Release
+      labels:
+        - chore
+        - ci
+        - release
+    - title: Documentation
+      labels:
+        - docs
+    - title: Other Changes
+      labels:
+        - "*"

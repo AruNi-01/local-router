@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "apps/localrouter-cli",
+  "apps/localrouterd",
+  "crates/localrouter-core",
+]
+resolver = "2"

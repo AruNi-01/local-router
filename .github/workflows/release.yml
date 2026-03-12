@@ -1,0 +1,147 @@
+name: release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/dashboard/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release archive
+        run: ./scripts/release/build-release.sh "${{ matrix.target }}" "${{ matrix.platform }}"
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: localrouter-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find dist -name '*.tar.gz' -exec cp {} release/ \;
+          find dist -name '*.tar.gz.sha256' -exec cp {} release/ \;
+
+      - name: Duplicate latest-style asset names
+        run: |
+          cd release
+          for archive in localrouter-v*-*.tar.gz; do
+            platform="${archive#localrouter-v}"
+            platform="${platform#*-}"
+            cp "${archive}" "localrouter-latest-${platform}.tar.gz"
+            cp "${archive}.sha256" "localrouter-latest-${platform}.tar.gz.sha256"
+          done
+
+      - name: Generate Homebrew formula
+        run: ./scripts/release/generate-homebrew-formula.sh release
+
+      - name: Generate Homebrew tap README
+        env:
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          HOMEBREW_TAP_FORMULA_NAME: ${{ vars.HOMEBREW_TAP_FORMULA_NAME }}
+        run: ./scripts/release/generate-homebrew-tap-readme.sh
+
+      - name: Copy Homebrew formula into release assets
+        run: |
+          cp dist/homebrew/localrouter.rb release/localrouter.rb
+          cp dist/homebrew/README.md release/homebrew-tap-README.md
+
+      - name: Publish GitHub release assets
+        id: publish_release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+
+      - name: Update Homebrew tap
+        id: update_tap
+        env:
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_BRANCH: ${{ vars.HOMEBREW_TAP_BRANCH }}
+          HOMEBREW_TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
+          HOMEBREW_TAP_FORMULA_NAME: ${{ vars.HOMEBREW_TAP_FORMULA_NAME }}
+          HOMEBREW_TAP_README_SOURCE: dist/homebrew/README.md
+          HOMEBREW_TAP_README_PATH: ${{ vars.HOMEBREW_TAP_README_PATH }}
+          HOMEBREW_TAP_UPDATE_README: ${{ vars.HOMEBREW_TAP_UPDATE_README }}
+          HOMEBREW_TAP_GIT_NAME: ${{ vars.HOMEBREW_TAP_GIT_NAME }}
+          HOMEBREW_TAP_GIT_EMAIL: ${{ vars.HOMEBREW_TAP_GIT_EMAIL }}
+        run: ./scripts/release/update-homebrew-tap.sh release/localrouter.rb
+
+      - name: Write release summary
+        run: |
+          {
+            echo "## LocalRouter Release"
+            echo
+            echo "- Tag: \`${GITHUB_REF_NAME}\`"
+            echo "- Release URL: ${{ steps.publish_release.outputs.url }}"
+            echo "- Release ID: \`${{ steps.publish_release.outputs.id }}\`"
+            echo
+            echo "### Assets"
+            find release -maxdepth 1 -type f | sed 's#^release/##' | sort | sed 's/^/- /'
+            echo
+            echo "### Homebrew Tap"
+            if [[ -n "${HOMEBREW_TAP_REPO:-}" && -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+              echo "- Tap repo: \`${HOMEBREW_TAP_REPO}\`"
+              echo "- Formula path: \`${HOMEBREW_TAP_FORMULA_PATH:-Formula/localrouter.rb}\`"
+              echo "- README path: \`${HOMEBREW_TAP_README_PATH:-README.md}\`"
+              echo "- Result: automatic update attempted"
+            else
+              echo "- Result: skipped because tap automation is not configured"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
+          HOMEBREW_TAP_README_PATH: ${{ vars.HOMEBREW_TAP_README_PATH }}
