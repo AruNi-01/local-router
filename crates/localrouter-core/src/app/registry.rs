@@ -150,6 +150,8 @@ impl AppState {
             .collect::<Vec<_>>();
         let services = services_from_manifest(project_id, &manifest)?;
 
+        write_manifest_to_disk(&project_path, &raw)?;
+
         {
             let mut inner = self.inner.write().await;
             if let Some(project) = inner.projects.get_mut(project_id) {
@@ -214,8 +216,6 @@ impl AppState {
             }
             reconcile_routes_locked(&mut inner);
         }
-
-        write_manifest_to_disk(&project_path, &raw)?;
 
         self.emit("service_spec_changed", json!({ "projectId": project_id }))
             .await;
