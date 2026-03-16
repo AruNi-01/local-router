@@ -1,11 +1,12 @@
 mod go;
+mod java;
 mod node;
 mod python;
 mod repo;
 mod rust;
 mod shared;
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
@@ -32,24 +33,6 @@ pub fn autodetect_manifest(path: &Path) -> Result<ProjectManifest> {
         if let Some((service_name, service)) = candidate.into_manifest_service() {
             insert_manifest_service(&mut manifest, service_name, service);
         }
-    }
-
-    if manifest.services.is_empty() {
-        manifest.services.insert(
-            "app".to_string(),
-            ManifestService {
-                command: "python -m http.server ${PORT}".to_string(),
-                cwd: None,
-                protocol: Some("http".to_string()),
-                adapter: Some("generic".to_string()),
-                route: Some("app".to_string()),
-                healthcheck: Some("http://127.0.0.1:${PORT}".to_string()),
-                env: BTreeMap::new(),
-                depends_on: Vec::new(),
-                disabled: Some(false),
-                language: Some("generic".to_string()),
-            },
-        );
     }
 
     Ok(manifest)
@@ -119,6 +102,34 @@ fn detect_candidates(project_root: &Path, repo: &RepoLayout) -> Result<Vec<Detec
         .filter(|entry| entry.file_name() == "go.mod")
     {
         if let Some(candidate) = go::detect_go_candidate(project_root, go_mod.path(), repo)? {
+            candidates.push(candidate);
+        }
+    }
+
+    for requirements_txt in WalkDir::new(project_root)
+        .max_depth(5)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() == "requirements.txt")
+    {
+        if let Some(candidate) =
+            python::detect_requirements_txt_candidate(project_root, requirements_txt.path(), repo)?
+        {
+            candidates.push(candidate);
+        }
+    }
+
+    for build_file in WalkDir::new(project_root)
+        .max_depth(5)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            name == "pom.xml" || name == "build.gradle" || name == "build.gradle.kts"
+        })
+    {
+        if let Some(candidate) = java::detect_java_candidate(project_root, build_file.path(), repo)?
+        {
             candidates.push(candidate);
         }
     }
@@ -301,6 +312,197 @@ dependencies = ["fastapi", "uvicorn"]
             "python -m uvicorn main:app --host ${HOST} --port ${PORT}"
         );
         assert_eq!(py_api.language.as_deref(), Some("python"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_angular_project() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        fs::write(
+            root.join("package.json"),
+            r#"{
+              "name": "my-angular-app",
+              "scripts": { "dev": "ng serve" },
+              "dependencies": { "@angular/core": "^17.0.0" },
+              "devDependencies": { "typescript": "^5.0.0" }
+            }"#,
+        )?;
+
+        let manifest = autodetect_manifest(root)?;
+
+        let app = manifest.services.get("my-angular-app").unwrap();
+        assert_eq!(app.adapter.as_deref(), Some("angular"));
+        assert_eq!(app.language.as_deref(), Some("typescript"));
+        assert!(app.command.contains("--host ${HOST} --port ${PORT}"));
+        assert_eq!(app.disabled, Some(false));
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_requirements_txt_flask() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("services/web-app"))?;
+        fs::write(
+            root.join("services/web-app/requirements.txt"),
+            "flask>=2.0\ngunicorn\n",
+        )?;
+
+        let manifest = autodetect_manifest(root)?;
+
+        let web = manifest.services.get("web-app").unwrap();
+        assert_eq!(web.adapter.as_deref(), Some("flask"));
+        assert_eq!(web.command, "flask run --host ${HOST} --port ${PORT}");
+        assert_eq!(web.language.as_deref(), Some("python"));
+        assert_eq!(web.disabled, Some(false));
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_requirements_txt_fastapi_with_entry() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("services/api"))?;
+        fs::write(
+            root.join("services/api/requirements.txt"),
+            "fastapi>=0.100\nuvicorn[standard]\n",
+        )?;
+        fs::write(
+            root.join("services/api/app.py"),
+            "from fastapi import FastAPI\napp = FastAPI()\n",
+        )?;
+
+        let manifest = autodetect_manifest(root)?;
+
+        let api = manifest.services.get("api").unwrap();
+        assert_eq!(api.adapter.as_deref(), Some("fastapi"));
+        assert_eq!(
+            api.command,
+            "python -m uvicorn app:app --host ${HOST} --port ${PORT}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_spring_boot_maven() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("services/user-service"))?;
+        fs::write(
+            root.join("services/user-service/pom.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <artifactId>user-service</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+  </dependencies>
+</project>"#,
+        )?;
+
+        let manifest = autodetect_manifest(root)?;
+
+        let svc = manifest.services.get("user-service").unwrap();
+        assert_eq!(svc.adapter.as_deref(), Some("spring-boot"));
+        assert_eq!(svc.command, "mvn spring-boot:run -Dserver.port=${PORT}");
+        assert_eq!(svc.language.as_deref(), Some("java"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_spring_boot_gradle() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("services/order-service"))?;
+        fs::write(
+            root.join("services/order-service/build.gradle"),
+            r#"plugins {
+    id 'org.springframework.boot' version '3.2.0'
+}
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+}"#,
+        )?;
+
+        let manifest = autodetect_manifest(root)?;
+
+        let svc = manifest.services.get("order-service").unwrap();
+        assert_eq!(svc.adapter.as_deref(), Some("spring-boot"));
+        assert_eq!(
+            svc.command,
+            "./gradlew bootRun --args=--server.port=${PORT}"
+        );
+        assert_eq!(svc.language.as_deref(), Some("java"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_standalone_generic_gets_review() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        fs::write(
+            root.join("package.json"),
+            r#"{
+              "name": "my-app",
+              "scripts": { "dev": "node server.js" }
+            }"#,
+        )?;
+
+        let manifest = autodetect_manifest(root)?;
+
+        let app = manifest.services.get("my-app").unwrap();
+        assert_eq!(app.adapter.as_deref(), Some("generic"));
+        assert_eq!(app.disabled, Some(true));
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_empty_project_returns_no_services() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        let manifest = autodetect_manifest(root)?;
+        assert!(manifest.services.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn autodetect_flask_pyproject_gets_high_confidence() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("services/web"))?;
+        fs::write(
+            root.join("services/web/pyproject.toml"),
+            r#"[project]
+name = "web"
+dependencies = ["flask"]
+"#,
+        )?;
+
+        let manifest = autodetect_manifest(root)?;
+
+        let web = manifest.services.get("web").unwrap();
+        assert_eq!(web.adapter.as_deref(), Some("flask"));
+        assert_eq!(web.disabled, Some(false));
 
         Ok(())
     }

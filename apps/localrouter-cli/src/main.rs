@@ -273,9 +273,15 @@ async fn reset_command(command: ResetCommand, json: bool, client: &Client) -> Re
                 "dataDir": data_dir,
             });
             let human = if removed {
-                format!("cleared localrouter state\n{}\ndaemon={daemon}", data_dir.display())
+                format!(
+                    "cleared localrouter state\n{}\ndaemon={daemon}",
+                    data_dir.display()
+                )
             } else {
-                format!("localrouter state already clean\n{}\ndaemon={daemon}", data_dir.display())
+                format!(
+                    "localrouter state already clean\n{}\ndaemon={daemon}",
+                    data_dir.display()
+                )
             };
             print_output(json, &payload, human);
             Ok(())

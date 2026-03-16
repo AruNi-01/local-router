@@ -32,8 +32,8 @@ pub struct RepoLayout {
     pub has_rust_workspace: bool,
     pub has_go_workspace: bool,
     pub has_python_workspace: bool,
-    pub _has_gradle_workspace: bool,
-    pub _has_maven_workspace: bool,
+    pub has_gradle_workspace: bool,
+    pub has_maven_workspace: bool,
     pub _has_dotnet_workspace: bool,
 }
 
@@ -61,9 +61,9 @@ pub fn classify_repo(project_root: &Path) -> RepoLayout {
             || root_pyproject.contains("[tool.pdm]")
             || root_pyproject.contains("[tool.hatch")
             || count_named_files(project_root, "pyproject.toml", 4) > 1,
-        _has_gradle_workspace: project_root.join("settings.gradle").exists()
+        has_gradle_workspace: project_root.join("settings.gradle").exists()
             || project_root.join("settings.gradle.kts").exists(),
-        _has_maven_workspace: fs::read_to_string(project_root.join("pom.xml"))
+        has_maven_workspace: fs::read_to_string(project_root.join("pom.xml"))
             .map(|raw| raw.contains("<modules>"))
             .unwrap_or(false),
         _has_dotnet_workspace: count_files_with_extension(project_root, "sln", 2) > 0,

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use serde_json::json;
 use reqwest::StatusCode;
+use serde_json::json;
 use sysinfo::{ProcessesToUpdate, System};
 use tokio::{
     sync::watch,
@@ -165,30 +165,37 @@ enum HealthcheckResult {
 
 async fn evaluate_healthcheck(app: &AppState, healthcheck_url: &str) -> HealthcheckResult {
     match app.client.get(healthcheck_url).send().await {
-        Ok(response) if healthcheck_response_is_ready(response.status()) => HealthcheckResult::Healthy,
+        Ok(response) if healthcheck_response_is_ready(response.status()) => {
+            HealthcheckResult::Healthy
+        }
         Ok(response) => HealthcheckResult::Unhealthy(format!(
             "Healthcheck {healthcheck_url} returned {} {}.",
             response.status().as_u16(),
-            response.status().canonical_reason().unwrap_or("unknown status"),
+            response
+                .status()
+                .canonical_reason()
+                .unwrap_or("unknown status"),
         )),
-        Err(error) => HealthcheckResult::Unhealthy(format!(
-            "Healthcheck {healthcheck_url} failed: {error}."
-        )),
+        Err(error) => {
+            HealthcheckResult::Unhealthy(format!("Healthcheck {healthcheck_url} failed: {error}."))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{HealthcheckResult, evaluate_healthcheck, healthcheck_response_is_ready};
-    use reqwest::StatusCode;
-    use axum::{Router, routing::get};
-    use tokio::net::TcpListener;
     use crate::{AppState, storage::PersistedState};
+    use axum::{Router, routing::get};
+    use reqwest::StatusCode;
+    use tokio::net::TcpListener;
 
     #[test]
     fn accepts_redirect_and_client_error_as_ready() {
         assert!(healthcheck_response_is_ready(StatusCode::OK));
-        assert!(healthcheck_response_is_ready(StatusCode::TEMPORARY_REDIRECT));
+        assert!(healthcheck_response_is_ready(
+            StatusCode::TEMPORARY_REDIRECT
+        ));
         assert!(healthcheck_response_is_ready(StatusCode::UNAUTHORIZED));
         assert!(healthcheck_response_is_ready(StatusCode::NOT_FOUND));
     }
@@ -196,7 +203,9 @@ mod tests {
     #[test]
     fn rejects_server_error_as_not_ready() {
         assert!(!healthcheck_response_is_ready(StatusCode::BAD_GATEWAY));
-        assert!(!healthcheck_response_is_ready(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!healthcheck_response_is_ready(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
     }
 
     #[tokio::test]
@@ -207,9 +216,12 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, upstream).await;
         });
-        let app = AppState::for_tests(PersistedState::default()).await.unwrap();
+        let app = AppState::for_tests(PersistedState::default())
+            .await
+            .unwrap();
 
-        let result = evaluate_healthcheck(&app, &format!("http://127.0.0.1:{}/", addr.port())).await;
+        let result =
+            evaluate_healthcheck(&app, &format!("http://127.0.0.1:{}/", addr.port())).await;
         assert!(matches!(result, HealthcheckResult::Unhealthy(reason) if reason.contains("502")));
     }
 }
