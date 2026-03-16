@@ -477,6 +477,7 @@ mod tests {
             path: "/tmp/demo".to_string(),
             created_at: now_rfc3339(),
             config_source: "manifest".to_string(),
+            proxy_disabled: false,
         };
         let workspace = Workspace {
             id: "ws-1".to_string(),
@@ -587,6 +588,7 @@ mod tests {
             path: "/tmp/demo".to_string(),
             created_at: now_rfc3339(),
             config_source: "manifest".to_string(),
+            proxy_disabled: false,
         };
         let workspace = Workspace {
             id: "ws-1".to_string(),

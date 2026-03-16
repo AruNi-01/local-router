@@ -48,3 +48,13 @@ pub fn relative_cwd(project_root: &Path, service_dir: &Path) -> Option<String> {
         Some(stripped.to_string_lossy().to_string())
     }
 }
+
+pub fn is_valid_dns_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+}

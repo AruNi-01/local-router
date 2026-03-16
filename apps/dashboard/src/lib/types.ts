@@ -6,6 +6,7 @@ export interface Project {
   path: string;
   createdAt: string;
   configSource?: string;
+  proxyDisabled?: boolean;
 }
 
 export interface Workspace {
@@ -28,6 +29,10 @@ export interface ServiceDef {
   route: string;
   healthcheck: string;
   language: string;
+  cwd?: string | null;
+  env: Record<string, string>;
+  dependsOn: string[];
+  enabled: boolean;
 }
 
 export interface Instance {

@@ -39,10 +39,16 @@ const item = {
 
 interface ServiceFormData extends ServiceDef {}
 
-function buildManifest(projectName: string, services: ServiceFormData[]) {
+function buildManifest(existingManifestYaml: string, projectName: string, services: ServiceFormData[]) {
+  let existing: Record<string, unknown> = {};
+  try {
+    existing = (parseYaml(existingManifestYaml) as Record<string, unknown>) || {};
+  } catch { /* use defaults if existing manifest is invalid */ }
+
   return stringifyYaml({
     project: projectName,
-    workspace: { strategy: 'git-worktree' },
+    workspace: existing.workspace || { strategy: 'git-worktree' },
+    proxy: existing.proxy || undefined,
     services: Object.fromEntries(services.map((service) => [
       service.name,
       {
@@ -52,10 +58,10 @@ function buildManifest(projectName: string, services: ServiceFormData[]) {
         adapter: service.adapter,
         route: service.route,
         healthcheck: service.healthcheck || undefined,
-        env: service.env,
-        depends_on: service.dependsOn,
+        env: Object.keys(service.env || {}).length > 0 ? service.env : undefined,
+        depends_on: (service.dependsOn || []).length > 0 ? service.dependsOn : undefined,
         language: service.language,
-        disabled: !service.enabled,
+        enabled: service.enabled,
       },
     ])),
   });
@@ -162,7 +168,7 @@ export default function SettingsPage() {
       return;
     }
     if (activeTab === 'project') {
-      const nextManifest = buildManifest(detail.project.name, services);
+      const nextManifest = buildManifest(detail.manifest, detail.project.name, services);
       setManifest(nextManifest);
       saveManifest.mutate({ projectId: detail.project.id, nextManifest });
       return;

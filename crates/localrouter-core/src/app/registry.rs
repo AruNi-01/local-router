@@ -6,9 +6,11 @@ use nix::{
     unistd::Pid,
 };
 use serde_json::json;
-
 use crate::{
-    manifest::{LoadedProject, load_project, parse_manifest, services_from_manifest, stable_id},
+    manifest::{
+        LoadedProject, load_project, parse_manifest, services_from_manifest, stable_id,
+        validate_service_paths, write_manifest_to_disk,
+    },
     models::{AddProjectRequest, HealthStatus, Instance, ProjectDetail},
     storage::PersistedState,
 };
@@ -124,6 +126,18 @@ impl AppState {
 
     pub async fn update_manifest(&self, project_id: &str, raw: String) -> Result<ProjectDetail> {
         let manifest = parse_manifest(&raw)?;
+
+        let project_path = {
+            let inner = self.inner.read().await;
+            inner
+                .projects
+                .get(project_id)
+                .map(|p| p.path.clone())
+                .ok_or_else(|| anyhow!("project not found"))?
+        };
+
+        validate_service_paths(Path::new(&project_path), &manifest)?;
+
         let config = self.config.read().await.clone();
         let workspaces = self
             .inner
@@ -136,8 +150,13 @@ impl AppState {
             .collect::<Vec<_>>();
         let services = services_from_manifest(project_id, &manifest)?;
 
+        write_manifest_to_disk(&project_path, &raw)?;
+
         {
             let mut inner = self.inner.write().await;
+            if let Some(project) = inner.projects.get_mut(project_id) {
+                project.proxy_disabled = manifest.proxy.disabled.unwrap_or(false);
+            }
             inner.manifests.insert(project_id.to_string(), raw.clone());
             inner
                 .services
@@ -197,6 +216,7 @@ impl AppState {
             }
             reconcile_routes_locked(&mut inner);
         }
+
         self.emit("service_spec_changed", json!({ "projectId": project_id }))
             .await;
         self.persist().await?;
