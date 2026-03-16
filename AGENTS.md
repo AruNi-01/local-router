@@ -33,7 +33,7 @@ The daemon serves an embedded copy of the dashboard at `http://127.0.0.1:9731/`.
 
 ### Testing
 
-- **Rust**: `cargo test` (16 tests in `localrouter-core`)
+- **Rust**: `cargo test` (25 tests in `localrouter-core`)
 - **Dashboard**: `npm run test` in `apps/dashboard` (vitest)
 - **Lint**: `npm run lint` in `apps/dashboard` (ESLint; pre-existing warnings/errors exist)
 - **Format**: `cargo fmt --all --check` (pre-existing formatting diffs exist)
