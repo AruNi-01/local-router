@@ -137,6 +137,8 @@ fn infer_node_adapter(
         "astro".to_string()
     } else if lower.contains("remix") {
         "remix".to_string()
+    } else if lower.contains("@angular") || lower.contains("ng serve") {
+        "angular".to_string()
     } else if lower.contains("sveltekit") || lower.contains("@sveltejs/kit") {
         "sveltekit".to_string()
     } else if lower.contains("vite") {
@@ -163,6 +165,7 @@ fn infer_node_language(parsed: &Value, adapter: &str) -> String {
         adapter,
         "nextjs"
             | "nuxt"
+            | "angular"
             | "astro"
             | "remix"
             | "sveltekit"
@@ -221,6 +224,7 @@ fn infer_node_confidence(
         adapter,
         "nextjs"
             | "nuxt"
+            | "angular"
             | "astro"
             | "remix"
             | "sveltekit"
@@ -244,6 +248,9 @@ fn infer_node_confidence(
             return DetectionConfidence::Review;
         }
     }
+    if relative.is_none() {
+        return DetectionConfidence::Review;
+    }
     DetectionConfidence::Low
 }
 
@@ -251,7 +258,7 @@ fn node_run_command(package_manager: PackageManager, script_name: &str, adapter:
     let base = package_manager.run_script(script_name);
     match adapter {
         "nextjs" => format!("{base} -- --hostname ${{HOST}} --port ${{PORT}}"),
-        "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" => {
+        "nuxt" | "angular" | "astro" | "remix" | "sveltekit" | "vite" | "vue" => {
             format!("{base} -- --host ${{HOST}} --port ${{PORT}}")
         }
         _ => base,

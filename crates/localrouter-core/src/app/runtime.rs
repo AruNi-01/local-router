@@ -138,11 +138,12 @@ impl AppState {
                 instance.started_at = Some(now_rfc3339());
                 instance.uptime = uptime_string(instance.started_at.as_deref());
                 instance.last_exit = None;
-                instance.status_reason = Some(if service.protocol == "http" && service.route != "none" {
-                    format!("Waiting for healthcheck at http://127.0.0.1:{port}.")
-                } else {
-                    "Process is starting.".to_string()
-                });
+                instance.status_reason =
+                    Some(if service.protocol == "http" && service.route != "none" {
+                        format!("Waiting for healthcheck at http://127.0.0.1:{port}.")
+                    } else {
+                        "Process is starting.".to_string()
+                    });
             }
 
             for route in inner.routes.values_mut().filter(|route| {
@@ -414,7 +415,7 @@ fn adapter_runtime_flags(adapter: &str, port: u16) -> Vec<String> {
             "--port".to_string(),
             port.to_string(),
         ],
-        "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" => vec![
+        "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" | "angular" => vec![
             "--host".to_string(),
             LOOPBACK_HOST.to_string(),
             "--port".to_string(),
@@ -428,6 +429,12 @@ fn adapter_runtime_flags(adapter: &str, port: u16) -> Vec<String> {
             port.to_string(),
         ],
         "django" => vec![format!("{LOOPBACK_HOST}:{port}")],
+        // Backend Node.js frameworks rely on PORT env var injected by the
+        // runtime (line ~89).  No CLI flags exist for these adapters.
+        "nest" | "fastify" | "express" | "hono" | "koa" => Vec::new(),
+        // Spring Boot / Quarkus use ${PORT} template in the command string,
+        // which is already substituted by render_command().
+        "spring-boot" | "quarkus" => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -507,7 +514,8 @@ fn strip_conflicting_runtime_flags(args: &mut Vec<String>, adapter: &str) {
 fn takes_flag_value(adapter: &str, arg: &str) -> bool {
     match adapter {
         "nextjs" => matches!(arg, "--hostname" | "--host" | "--port" | "-p" | "-H"),
-        "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" | "fastapi" | "starlette" => {
+        "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" | "angular" | "fastapi"
+        | "starlette" => {
             matches!(arg, "--hostname" | "--host" | "--port" | "-p" | "-H")
         }
         _ => false,
@@ -516,8 +524,8 @@ fn takes_flag_value(adapter: &str, arg: &str) -> bool {
 
 fn is_inline_flag(adapter: &str, arg: &str) -> bool {
     match adapter {
-        "nextjs" | "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" | "fastapi"
-        | "starlette" => {
+        "nextjs" | "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" | "angular"
+        | "fastapi" | "starlette" => {
             arg.starts_with("--host=")
                 || arg.starts_with("--hostname=")
                 || arg.starts_with("--port=")
@@ -527,8 +535,10 @@ fn is_inline_flag(adapter: &str, arg: &str) -> bool {
 }
 
 fn is_boolean_flag(adapter: &str, arg: &str) -> bool {
-    matches!(adapter, "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue")
-        && matches!(arg, "--strictPort" | "--strict-port")
+    matches!(
+        adapter,
+        "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" | "angular"
+    ) && matches!(arg, "--strictPort" | "--strict-port")
 }
 
 fn is_django_bind_arg(arg: &str) -> bool {
@@ -633,14 +643,7 @@ mod tests {
 
         assert_eq!(
             args,
-            vec![
-                "next",
-                "dev",
-                "--hostname",
-                LOOPBACK_HOST,
-                "--port",
-                "5123",
-            ]
+            vec!["next", "dev", "--hostname", LOOPBACK_HOST, "--port", "5123",]
         );
     }
 
@@ -656,6 +659,31 @@ mod tests {
         assert_eq!(
             args,
             vec!["python", "manage.py", "runserver", "127.0.0.1:6123"]
+        );
+    }
+
+    #[test]
+    fn rewrites_angular_serve_flags() {
+        let args = build_runtime_argv(
+            &sample_service("npm run dev -- --port 4200", "angular"),
+            5555,
+            "http://app.localhost:9730",
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "npm",
+                "run",
+                "dev",
+                "--",
+                "--host",
+                LOOPBACK_HOST,
+                "--port",
+                "5555",
+                "--strictPort",
+            ]
         );
     }
 

@@ -176,7 +176,9 @@ impl AppState {
                             memory: 0,
                             started_at: None,
                             last_exit: None,
-                            status_reason: Some("Instance is registered but not running.".to_string()),
+                            status_reason: Some(
+                                "Instance is registered but not running.".to_string(),
+                            ),
                         });
                     if service.route != "none" {
                         for route in build_project_routes(
@@ -272,7 +274,9 @@ impl AppState {
                             memory: 0,
                             started_at: None,
                             last_exit: None,
-                            status_reason: Some("Instance is registered but not running.".to_string()),
+                            status_reason: Some(
+                                "Instance is registered but not running.".to_string(),
+                            ),
                         },
                     );
                     if service.route != "none" {

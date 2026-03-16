@@ -28,6 +28,8 @@ pub fn infer_adapter(name: &str, command: &str) -> String {
         "astro".to_string()
     } else if haystack.contains("remix") {
         "remix".to_string()
+    } else if haystack.contains("@angular") || haystack.contains("ng serve") {
+        "angular".to_string()
     } else if haystack.contains("sveltekit") || haystack.contains("svelte-kit") {
         "sveltekit".to_string()
     } else if haystack.contains("vite") {
@@ -52,6 +54,10 @@ pub fn infer_adapter(name: &str, command: &str) -> String {
         "flask".to_string()
     } else if haystack.contains("starlette") {
         "starlette".to_string()
+    } else if haystack.contains("spring-boot") || haystack.contains("bootrun") {
+        "spring-boot".to_string()
+    } else if haystack.contains("quarkus") {
+        "quarkus".to_string()
     } else if haystack.contains("go run") {
         "go-http".to_string()
     } else if haystack.contains("cargo") {
@@ -69,9 +75,10 @@ pub fn infer_adapter(name: &str, command: &str) -> String {
 
 pub fn infer_language(adapter: &str) -> &'static str {
     match adapter {
-        "nextjs" | "nuxt" | "astro" | "remix" | "sveltekit" | "vite" | "vue" | "nest"
-        | "fastify" | "express" | "hono" | "koa" | "tauri" | "electron" => "typescript",
+        "nextjs" | "nuxt" | "angular" | "astro" | "remix" | "sveltekit" | "vite" | "vue"
+        | "nest" | "fastify" | "express" | "hono" | "koa" | "tauri" | "electron" => "typescript",
         "uvicorn" | "django" | "fastapi" | "flask" | "starlette" => "python",
+        "spring-boot" | "quarkus" => "java",
         "cargo-bin" => "rust",
         "go-http" => "go",
         _ => "generic",
