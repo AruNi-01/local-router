@@ -234,3 +234,66 @@ pub fn write_manifest_to_disk(project_path: &str, manifest_yaml: &str) -> Result
     fs::write(&manifest_path, manifest_yaml)
         .with_context(|| format!("failed to write {}", manifest_path.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_protocol() {
+        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: ftp\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for protocol 'ftp'");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown protocol"), "expected 'unknown protocol' in: {msg}");
+    }
+
+    #[test]
+    fn rejects_unknown_adapter() {
+        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    adapter: fake-thing\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for adapter 'fake-thing'");
+    }
+
+    #[test]
+    fn rejects_missing_depends_on_ref() {
+        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    depends_on:\n      - ghost\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for missing depends_on reference");
+    }
+
+    #[test]
+    fn rejects_enabled_and_disabled_together() {
+        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    enabled: true\n    disabled: true\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for both enabled and disabled");
+    }
+
+    #[test]
+    fn rejects_invalid_healthcheck_url() {
+        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    healthcheck: just-text\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for invalid healthcheck");
+    }
+
+    #[test]
+    fn rejects_lowercase_template_var() {
+        let yaml = "project: test\nservices:\n  web:\n    command: \"node server.js --port ${port}\"\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for lowercase ${{port}}");
+    }
+
+    #[test]
+    fn accepts_valid_manifest() {
+        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: http\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_ok(), "expected valid manifest to parse: {:?}", result.err());
+    }
+
+    #[test]
+    fn rejects_empty_services() {
+        let yaml = "project: test\nservices: {}\n";
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for empty services");
+    }
+}
