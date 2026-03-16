@@ -6,8 +6,6 @@ use nix::{
     unistd::Pid,
 };
 use serde_json::json;
-use tracing::warn;
-
 use crate::{
     manifest::{
         LoadedProject, load_project, parse_manifest, services_from_manifest, stable_id,
@@ -154,6 +152,9 @@ impl AppState {
 
         {
             let mut inner = self.inner.write().await;
+            if let Some(project) = inner.projects.get_mut(project_id) {
+                project.proxy_disabled = manifest.proxy.disabled.unwrap_or(false);
+            }
             inner.manifests.insert(project_id.to_string(), raw.clone());
             inner
                 .services
@@ -213,16 +214,8 @@ impl AppState {
             }
             reconcile_routes_locked(&mut inner);
         }
-        {
-            let mut inner = self.inner.write().await;
-            if let Some(project) = inner.projects.get_mut(project_id) {
-                project.proxy_disabled = manifest.proxy.disabled.unwrap_or(false);
-            }
-        }
 
-        if let Err(e) = write_manifest_to_disk(&project_path, &raw) {
-            warn!("failed to write localrouter.yaml back to disk: {e}");
-        }
+        write_manifest_to_disk(&project_path, &raw)?;
 
         self.emit("service_spec_changed", json!({ "projectId": project_id }))
             .await;

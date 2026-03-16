@@ -100,6 +100,15 @@ pub fn validate_manifest(manifest: &ProjectManifest) -> Result<()> {
         let route_name = svc.route.as_deref().unwrap_or(name);
         if route_name != "none" {
             let slug = slugify(route_name);
+            if !is_valid_dns_label(&slug) {
+                return Err(anyhow!(
+                    "service '{}': route '{}' produces an invalid DNS label '{}' \
+                     (must be 1-63 alphanumeric/hyphen characters, no leading/trailing hyphen)",
+                    name,
+                    route_name,
+                    slug
+                ));
+            }
             if let Some(existing) = route_slugs.get(&slug) {
                 return Err(anyhow!(
                     "services '{}' and '{}' produce the same route slug '{}'",
@@ -216,9 +225,9 @@ pub fn validate_service_paths(project_path: &Path, manifest: &ProjectManifest) -
         if let Some(ref cwd) = svc.cwd {
             let resolved =
                 resolve_service_cwd(&project_path.to_string_lossy(), Some(cwd.as_str()));
-            if !resolved.exists() {
+            if !resolved.is_dir() {
                 return Err(anyhow!(
-                    "service '{}': cwd '{}' does not exist (resolved to {})",
+                    "service '{}': cwd '{}' is not an existing directory (resolved to {})",
                     name,
                     cwd,
                     resolved.display()

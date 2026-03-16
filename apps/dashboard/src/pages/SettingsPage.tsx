@@ -168,7 +168,7 @@ export default function SettingsPage() {
       return;
     }
     if (activeTab === 'project') {
-      const nextManifest = buildManifest(manifest, detail.project.name, services);
+      const nextManifest = buildManifest(detail.manifest, detail.project.name, services);
       setManifest(nextManifest);
       saveManifest.mutate({ projectId: detail.project.id, nextManifest });
       return;
