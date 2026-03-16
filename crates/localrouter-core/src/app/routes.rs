@@ -170,6 +170,9 @@ pub(crate) fn build_project_routes(
     dns_suffix: &str,
     proxy_port: u16,
 ) -> Vec<Route> {
+    if project.proxy_disabled {
+        return Vec::new();
+    }
     let route_specs = [
         Some((
             stable_id(
@@ -229,6 +232,7 @@ mod tests {
             path: "/tmp/local-router".to_string(),
             created_at: now_rfc3339(),
             config_source: "manifest".to_string(),
+            proxy_disabled: false,
         }
     }
 

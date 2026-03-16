@@ -31,6 +31,39 @@ pub struct ManifestProxy {
     pub disabled: Option<bool>,
 }
 
+pub const KNOWN_PROTOCOLS: &[&str] = &["http", "none"];
+
+pub const KNOWN_ADAPTERS: &[&str] = &[
+    "nextjs",
+    "nuxt",
+    "astro",
+    "remix",
+    "sveltekit",
+    "vite",
+    "vue",
+    "angular",
+    "nest",
+    "fastify",
+    "express",
+    "hono",
+    "koa",
+    "django",
+    "fastapi",
+    "flask",
+    "starlette",
+    "uvicorn",
+    "spring-boot",
+    "quarkus",
+    "go-http",
+    "cargo-bin",
+    "tauri",
+    "electron",
+    "worker",
+    "generic",
+];
+
+pub const KNOWN_WORKSPACE_STRATEGIES: &[&str] = &["git-worktree"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ManifestService {
     pub command: String,
@@ -44,5 +77,15 @@ pub struct ManifestService {
     #[serde(default)]
     pub depends_on: Vec<String>,
     pub disabled: Option<bool>,
+    pub enabled: Option<bool>,
     pub language: Option<String>,
+}
+
+impl ManifestService {
+    pub fn is_enabled(&self) -> bool {
+        if let Some(enabled) = self.enabled {
+            return enabled;
+        }
+        !self.disabled.unwrap_or(false)
+    }
 }

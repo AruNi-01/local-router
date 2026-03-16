@@ -180,6 +180,7 @@ pub fn build_http_service(
         env: BTreeMap::new(),
         depends_on: Vec::new(),
         disabled: Some(false),
+        enabled: None,
         language: Some(language),
     }
 }
@@ -200,6 +201,7 @@ pub fn build_non_http_service(
         env: BTreeMap::new(),
         depends_on: Vec::new(),
         disabled: Some(false),
+        enabled: None,
         language: Some(language),
     }
 }

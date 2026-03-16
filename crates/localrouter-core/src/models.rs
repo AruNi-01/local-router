@@ -38,6 +38,8 @@ pub struct Project {
     pub path: String,
     pub created_at: String,
     pub config_source: String,
+    #[serde(default)]
+    pub proxy_disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

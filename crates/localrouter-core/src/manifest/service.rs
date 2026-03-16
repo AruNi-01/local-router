@@ -130,6 +130,6 @@ fn service_from_manifest(
         cwd: svc.cwd.clone(),
         env: svc.env.clone(),
         depends_on: svc.depends_on.clone(),
-        enabled: !svc.disabled.unwrap_or(false),
+        enabled: svc.is_enabled(),
     })
 }
