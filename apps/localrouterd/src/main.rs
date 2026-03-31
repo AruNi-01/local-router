@@ -1,4 +1,4 @@
-use std::fs;
+use std::{env, fs};
 
 use anyhow::Result;
 use axum::{
@@ -14,6 +14,7 @@ use localrouter_core::{
     AppState,
     api::{api_router, proxy_router},
     app::{api_addr, proxy_addr},
+    models::DaemonConfig,
     storage::pid_file_path,
 };
 use tokio::{net::TcpListener, signal};
@@ -23,11 +24,8 @@ static DASHBOARD_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../apps/da
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let state = AppState::load().await?;
+    init_tracing(&state.config().await);
     let api_addr = api_addr(&state).await;
     let proxy_addr = proxy_addr(&state).await;
     let api_listener = TcpListener::bind(api_addr).await?;
@@ -107,4 +105,50 @@ fn file_response(path: &str, contents: &[u8]) -> Response {
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     response
+}
+
+fn init_tracing(config: &DaemonConfig) {
+    let directive = tracing_directive(env::var("RUST_LOG").ok(), &config.log_level);
+    let filter = tracing_subscriber::EnvFilter::try_new(directive)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+fn tracing_directive(env_override: Option<String>, configured_level: &str) -> String {
+    let env_override = env_override.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    env_override.unwrap_or_else(|| {
+        let trimmed = configured_level.trim();
+        if trimmed.is_empty() {
+            "info".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tracing_directive;
+
+    #[test]
+    fn prefers_env_override_when_present() {
+        assert_eq!(
+            tracing_directive(Some("debug".to_string()), "warn"),
+            "debug"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_configured_level() {
+        assert_eq!(tracing_directive(None, "trace"), "trace");
+    }
+
+    #[test]
+    fn defaults_to_info_when_configured_level_is_empty() {
+        assert_eq!(tracing_directive(None, "   "), "info");
+    }
 }

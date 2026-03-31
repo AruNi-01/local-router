@@ -2,11 +2,11 @@ use std::{
     env, fs,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Command, Stdio},
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use localrouter_core::{
     models::{
@@ -450,6 +450,7 @@ fn ensure_daemon_binary() -> Result<PathBuf> {
         .ancestors()
         .find(|ancestor| ancestor.join("Cargo.toml").exists())
     {
+        build_embedded_dashboard(&workspace_root.to_path_buf())?;
         let status = std::process::Command::new("cargo")
             .arg("build")
             .arg("-p")
@@ -468,6 +469,49 @@ fn ensure_daemon_binary() -> Result<PathBuf> {
     Err(anyhow!(
         "localrouterd binary not found next to the CLI; build the workspace first"
     ))
+}
+
+fn build_embedded_dashboard(workspace_root: &Path) -> Result<()> {
+    let dashboard_root = workspace_root.join("apps/dashboard");
+    if !dashboard_root.exists() {
+        bail!(
+            "dashboard source directory not found at {}",
+            dashboard_root.display()
+        );
+    }
+
+    if !dashboard_root.join("node_modules").exists() {
+        run_command("npm", &["ci"], &dashboard_root)
+            .context("failed to install dashboard dependencies")?;
+    }
+
+    run_command("npm", &["run", "build"], &dashboard_root)
+        .context("failed to build embedded dashboard")?;
+    Ok(())
+}
+
+fn run_command(program: &str, args: &[&str], cwd: &Path) -> Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to run {} {} in {}",
+                program,
+                args.join(" "),
+                cwd.display()
+            )
+        })?;
+
+    if !status.success() {
+        bail!("{} {} failed in {}", program, args.join(" "), cwd.display());
+    }
+
+    Ok(())
 }
 
 async fn ensure_project_registered(client: &Client, path: &Path) -> Result<ProjectDetail> {
@@ -513,10 +557,23 @@ async fn control_instances(
     let instances = resolve_instances(client, target).await?;
     let mut changed = Vec::new();
     for instance in instances {
-        let next =
-            post_empty::<Instance>(client, &format!("/instances/{}/{}", instance.id, action))
-                .await?;
-        changed.push(next);
+        match post_empty::<Instance>(client, &format!("/instances/{}/{}", instance.id, action))
+            .await
+        {
+            Ok(next) => changed.push(next),
+            Err(error)
+                if action == "start"
+                    && error.to_string().contains("disabled in localrouter.yaml") =>
+            {
+                let current = fetch_json::<Vec<Instance>>(client, "/instances")
+                    .await?
+                    .into_iter()
+                    .find(|candidate| candidate.id == instance.id)
+                    .unwrap_or(instance);
+                changed.push(current);
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(changed)
 }
@@ -628,15 +685,22 @@ fn human_instances(instances: &[Instance]) -> String {
     instances
         .iter()
         .map(|instance| {
+            let reason = instance
+                .status_reason
+                .as_deref()
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| format!(" reason={reason}"))
+                .unwrap_or_default();
             format!(
-                "{}/{} [{}] status={:?} pid={} port={} {}",
+                "{}/{} [{}] status={:?} pid={} port={} {}{}",
                 instance.project_name,
                 instance.service_name,
                 instance.workspace_name,
                 instance.status,
                 instance.pid,
                 instance.port,
-                instance.url
+                instance.url,
+                reason
             )
         })
         .collect::<Vec<_>>()

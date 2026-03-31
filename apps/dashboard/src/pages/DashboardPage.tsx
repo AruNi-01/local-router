@@ -58,7 +58,9 @@ export default function DashboardPage() {
   const { data: health } = useQuery({ queryKey: ['health'], queryFn: api.health });
   const { data: routes = [] } = useQuery({ queryKey: ['routes'], queryFn: api.routes });
   const { data: logs = [] } = useQuery({ queryKey: ['logs'], queryFn: () => api.logs() });
+  const { data: services = [] } = useQuery({ queryKey: ['services'], queryFn: api.services });
   const stats = health?.counts;
+  const servicesById = new Map(services.map((service) => [service.id, service]));
 
   return (
     <DashboardLayout>
@@ -127,6 +129,8 @@ export default function DashboardPage() {
                       onRestart={restartInstance}
                       onStop={stopInstance}
                       onStart={startInstance}
+                      disabled={servicesById.get(inst.serviceId)?.enabled === false}
+                      disabledReason={inst.statusReason}
                     />
                   </div>
                 </Link>

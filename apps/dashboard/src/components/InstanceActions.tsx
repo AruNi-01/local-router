@@ -14,9 +14,20 @@ interface Props {
   onRestart: (inst: Instance) => void;
   onStop: (inst: Instance) => void;
   onStart: (inst: Instance) => void;
+  disabled?: boolean;
+  disabledReason?: string | null;
 }
 
-export function InstanceActions({ instance, isPending, pendingAction, onRestart, onStop, onStart }: Props) {
+export function InstanceActions({
+  instance,
+  isPending,
+  pendingAction,
+  onRestart,
+  onStop,
+  onStart,
+  disabled = false,
+  disabledReason,
+}: Props) {
   const isStopped = instance.status === 'stopped';
 
   if (isPending) {
@@ -36,13 +47,14 @@ export function InstanceActions({ instance, isPending, pendingAction, onRestart,
             <Button
               variant="ghost"
               size="sm"
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-success"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-success disabled:hover:text-muted-foreground"
+              disabled={disabled}
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart(instance); }}
             >
               <Play className="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="top">Start</TooltipContent>
+          <TooltipContent side="top">{disabled ? (disabledReason ?? 'Disabled') : 'Start'}</TooltipContent>
         </Tooltip>
       ) : (
         <>
@@ -51,13 +63,14 @@ export function InstanceActions({ instance, isPending, pendingAction, onRestart,
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground disabled:hover:text-muted-foreground"
+                disabled={disabled}
                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); onRestart(instance); }}
               >
                 <RotateCw className="h-3.5 w-3.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="top">Restart</TooltipContent>
+            <TooltipContent side="top">{disabled ? (disabledReason ?? 'Disabled') : 'Restart'}</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>

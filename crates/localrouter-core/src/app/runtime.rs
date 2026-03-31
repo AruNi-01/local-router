@@ -62,6 +62,33 @@ impl AppState {
             (service, workspace, project, instance)
         };
 
+        if !service.enabled {
+            let disabled_instance = {
+                let mut inner = self.inner.write().await;
+                if let Some(instance) = inner.instances.get_mut(instance_id) {
+                    instance.status = HealthStatus::Stopped;
+                    instance.pid = 0;
+                    instance.port = 0;
+                    instance.url.clear();
+                    instance.cpu = 0.0;
+                    instance.memory = 0;
+                    instance.started_at = None;
+                    instance.uptime = "—".to_string();
+                    instance.status_reason = Some(disabled_instance_reason(&service));
+                    instance.clone()
+                } else {
+                    existing_instance.clone()
+                }
+            };
+            self.emit(
+                "instance_skipped",
+                json!({ "instanceId": instance_id, "reason": disabled_instance_reason(&service) }),
+            )
+            .await;
+            self.persist().await?;
+            return Ok(disabled_instance);
+        }
+
         let port = self.allocate_port(instance_id).await;
         let host = route_host(
             &project.name,
@@ -79,7 +106,7 @@ impl AppState {
             .split_first()
             .ok_or_else(|| anyhow!("command is empty"))?;
 
-        let cwd = resolve_service_cwd(&project.path, service.cwd.as_deref());
+        let cwd = resolve_service_cwd(&workspace.path, service.cwd.as_deref());
         let mut process = Command::new(program);
         process
             .args(argv)
@@ -205,6 +232,15 @@ impl AppState {
     }
 
     pub async fn stop_instance(&self, instance_id: &str) -> Result<Instance> {
+        self.stop_instance_inner(instance_id, "Stopped by user.")
+            .await
+    }
+
+    pub(crate) async fn stop_instance_inner(
+        &self,
+        instance_id: &str,
+        reason: &str,
+    ) -> Result<Instance> {
         let pid = self
             .inner
             .read()
@@ -247,7 +283,7 @@ impl AppState {
                 instance.memory = 0;
                 instance.started_at = None;
                 instance.uptime = "—".to_string();
-                instance.status_reason = Some("Stopped by user.".to_string());
+                instance.status_reason = Some(reason.to_string());
             }
             if let (Some(route_service_id), Some(route_workspace_id)) =
                 (route_service_id, route_workspace_id)
@@ -583,16 +619,31 @@ fn instance_source(project: &Project, service: &ServiceDef, workspace: &Workspac
     }
 }
 
+fn disabled_instance_reason(service: &ServiceDef) -> String {
+    format!(
+        "Disabled in manifest; enable '{}' before starting it.",
+        service.name
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        LOOPBACK_HOST, ServiceDef, build_runtime_argv, find_free_loopback_port, is_port_available,
+    use std::{collections::BTreeMap, fs, time::Duration};
+
+    use super::{LOOPBACK_HOST, build_runtime_argv, find_free_loopback_port, is_port_available};
+    use crate::{
+        AppState,
+        models::{HealthStatus, Instance, Project, ServiceDef, Workspace, now_rfc3339},
+        storage::PersistedState,
     };
+    use tempfile::tempdir;
+    use tokio::time::sleep;
 
     fn sample_service(command: &str, adapter: &str) -> ServiceDef {
         ServiceDef {
             id: "svc_1".to_string(),
             project_id: "proj_1".to_string(),
+            workspace_id: Some("ws-1".to_string()),
             name: "web".to_string(),
             command: command.to_string(),
             protocol: "http".to_string(),
@@ -692,5 +743,139 @@ mod tests {
         let port = find_free_loopback_port(&[]).unwrap();
         assert_ne!(port, 0);
         assert!(is_port_available(port));
+    }
+
+    #[tokio::test]
+    async fn disabled_services_cannot_start() {
+        let service = ServiceDef {
+            enabled: false,
+            ..sample_service("echo hello", "generic")
+        };
+        let instance = Instance {
+            id: "inst-1".to_string(),
+            service_id: service.id.clone(),
+            service_name: service.name.clone(),
+            workspace_id: "ws-1".to_string(),
+            workspace_name: "main".to_string(),
+            project_id: "proj-1".to_string(),
+            project_name: "demo".to_string(),
+            port: 0,
+            pid: 0,
+            status: HealthStatus::Stopped,
+            url: String::new(),
+            uptime: "—".to_string(),
+            cpu: 0.0,
+            memory: 0,
+            started_at: None,
+            last_exit: None,
+            status_reason: Some("Instance is registered but not running.".to_string()),
+        };
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![Project {
+                id: "proj-1".to_string(),
+                name: "demo".to_string(),
+                path: "/tmp/demo".to_string(),
+                created_at: now_rfc3339(),
+                config_source: "manifest".to_string(),
+                proxy_disabled: false,
+            }],
+            workspaces: vec![Workspace {
+                id: "ws-1".to_string(),
+                project_id: "proj-1".to_string(),
+                name: "main".to_string(),
+                branch: "main".to_string(),
+                path: "/tmp/demo".to_string(),
+                is_active: true,
+                slug: "main".to_string(),
+            }],
+            services: vec![service],
+            instances: vec![instance],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let instance = app.start_instance("inst-1").await.unwrap();
+        assert_eq!(instance.status, HealthStatus::Stopped);
+        assert_eq!(instance.pid, 0);
+
+        let instances = app.instances().await;
+        assert!(
+            instances[0]
+                .status_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Disabled in manifest")
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_start_uses_workspace_path_for_relative_service_cwd() {
+        let temp = tempdir().unwrap();
+        let project_root = temp.path().join("project-main");
+        let workspace_root = temp.path().join("feature-worktree");
+        fs::create_dir_all(project_root.join("svc")).unwrap();
+        fs::create_dir_all(workspace_root.join("svc")).unwrap();
+
+        let service = ServiceDef {
+            cwd: Some("svc".to_string()),
+            command: "sh -c 'pwd > cwd.txt; sleep 1'".to_string(),
+            protocol: "none".to_string(),
+            route: "none".to_string(),
+            env: BTreeMap::new(),
+            depends_on: Vec::new(),
+            enabled: true,
+            ..sample_service("echo hello", "generic")
+        };
+        let instance = Instance {
+            id: "inst-1".to_string(),
+            service_id: service.id.clone(),
+            service_name: service.name.clone(),
+            workspace_id: "ws-1".to_string(),
+            workspace_name: "feature".to_string(),
+            project_id: "proj-1".to_string(),
+            project_name: "demo".to_string(),
+            port: 0,
+            pid: 0,
+            status: HealthStatus::Stopped,
+            url: String::new(),
+            uptime: "—".to_string(),
+            cpu: 0.0,
+            memory: 0,
+            started_at: None,
+            last_exit: None,
+            status_reason: Some("Instance is registered but not running.".to_string()),
+        };
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![Project {
+                id: "proj-1".to_string(),
+                name: "demo".to_string(),
+                path: project_root.to_string_lossy().to_string(),
+                created_at: now_rfc3339(),
+                config_source: "manifest".to_string(),
+                proxy_disabled: false,
+            }],
+            workspaces: vec![Workspace {
+                id: "ws-1".to_string(),
+                project_id: "proj-1".to_string(),
+                name: "feature".to_string(),
+                branch: "feature".to_string(),
+                path: workspace_root.to_string_lossy().to_string(),
+                is_active: true,
+                slug: "feature".to_string(),
+            }],
+            services: vec![service],
+            instances: vec![instance],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let _ = app.start_instance("inst-1").await.unwrap();
+        sleep(Duration::from_millis(250)).await;
+
+        let captured = fs::read_to_string(workspace_root.join("svc/cwd.txt")).unwrap();
+        let expected = workspace_root.join("svc").canonicalize().unwrap();
+        assert_eq!(captured.trim(), expected.to_string_lossy().as_ref());
     }
 }

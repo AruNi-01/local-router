@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 
 function eventsUrl() {
@@ -10,12 +10,20 @@ function eventsUrl() {
 
 export function useDaemonEvents() {
   const queryClient = useQueryClient();
+  const { data: config } = useQuery({
+    queryKey: ['config'],
+    queryFn: api.config,
+  });
 
   useEffect(() => {
+    if (!config?.hotReload) {
+      return;
+    }
+
     const socket = new WebSocket(eventsUrl());
     socket.onmessage = () => {
       queryClient.invalidateQueries();
     };
     return () => socket.close();
-  }, [queryClient]);
+  }, [config?.hotReload, queryClient]);
 }

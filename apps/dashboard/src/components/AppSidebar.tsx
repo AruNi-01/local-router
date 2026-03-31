@@ -1,5 +1,6 @@
 import { useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
+import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard,
   FolderKanban,
@@ -28,6 +29,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { api } from '@/lib/api';
 
 const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Overview' },
@@ -42,9 +44,21 @@ export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === 'collapsed';
   const location = useLocation();
+  const { data: health, isError } = useQuery({
+    queryKey: ['health'],
+    queryFn: api.health,
+    retry: false,
+    refetchInterval: 10_000,
+  });
 
   const isActive = (path: string) =>
     path === '/' ? location.pathname === '/' : location.pathname.startsWith(path);
+  const daemonOnline = Boolean(health) && !isError;
+  const daemonStatusText = daemonOnline ? 'Daemon online' : isError ? 'Daemon offline' : 'Checking daemon...';
+  const daemonVersionText = daemonOnline ? `v${health.daemon}` : 'version unknown';
+  const daemonPortsText = daemonOnline
+    ? `api ${health.apiPort} · proxy ${health.proxyPort}`
+    : 'api -- · proxy --';
 
   return (
     <Sidebar collapsible="icon">
@@ -56,7 +70,9 @@ export function AppSidebar() {
           {!collapsed && (
             <div className="overflow-hidden">
               <h1 className="text-[13px] font-bold tracking-tight text-foreground">LocalRouter</h1>
-              <p className="text-[10px] font-mono text-muted-foreground tracking-wide">v0.1.0</p>
+              <p className="text-[10px] font-mono text-muted-foreground tracking-wide">
+                {daemonVersionText}
+              </p>
             </div>
           )}
         </div>
@@ -112,15 +128,25 @@ export function AppSidebar() {
         <div className="px-2 py-3">
           <div className="flex items-center gap-2">
             <span className="relative flex h-2 w-2 shrink-0">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-40" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
+              <span
+                className={`absolute inline-flex h-full w-full animate-ping rounded-full ${
+                  daemonOnline ? 'bg-success opacity-40' : 'bg-destructive/40 opacity-30'
+                }`}
+              />
+              <span
+                className={`relative inline-flex h-2 w-2 rounded-full ${
+                  daemonOnline ? 'bg-success' : 'bg-destructive'
+                }`}
+              />
             </span>
             {!collapsed && (
-              <span className="text-[11px] font-medium text-muted-foreground">Daemon active</span>
+              <span className="text-[11px] font-medium text-muted-foreground">{daemonStatusText}</span>
             )}
           </div>
           {!collapsed && (
-            <p className="mt-1.5 text-[10px] font-mono text-muted-foreground/60">pid 41000 · :9800</p>
+            <p className="mt-1.5 text-[10px] font-mono text-muted-foreground/60">
+              {daemonVersionText} · {daemonPortsText}
+            </p>
           )}
         </div>
       </SidebarFooter>

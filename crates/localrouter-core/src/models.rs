@@ -59,6 +59,8 @@ pub struct Workspace {
 pub struct ServiceDef {
     pub id: String,
     pub project_id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub name: String,
     pub command: String,
     pub protocol: String,
