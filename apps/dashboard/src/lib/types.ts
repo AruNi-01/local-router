@@ -1,4 +1,9 @@
-export type HealthStatus = 'healthy' | 'unhealthy' | 'starting' | 'stopped' | 'unknown';
+export type HealthStatus =
+  | "healthy"
+  | "unhealthy"
+  | "starting"
+  | "stopped"
+  | "unknown";
 
 export interface Project {
   id: string;
@@ -22,6 +27,7 @@ export interface Workspace {
 export interface ServiceDef {
   id: string;
   projectId: string;
+  workspaceId?: string | null;
   name: string;
   command: string;
   protocol: string;
@@ -66,20 +72,20 @@ export interface Route {
   workspaceName: string;
   projectId: string;
   projectName: string;
-  status: 'active' | 'stale' | 'conflict';
+  status: "active" | "stale" | "conflict";
   conflictReason?: string | null;
 }
 
 export interface LogEntry {
   timestamp: string;
-  level: 'info' | 'warn' | 'error' | 'debug';
+  level: "info" | "warn" | "error" | "debug";
   source: string;
   message: string;
 }
 
 export interface GraphNode {
   id: string;
-  type: 'project' | 'workspace' | 'service' | 'route';
+  type: "project" | "workspace" | "service" | "route";
   label: string;
   status?: HealthStatus;
 }
@@ -87,7 +93,7 @@ export interface GraphNode {
 export interface GraphEdge {
   source: string;
   target: string;
-  type: 'contains' | 'depends_on' | 'exposes' | 'proxies_to';
+  type: "contains" | "depends_on" | "exposes" | "proxies_to";
 }
 
 export interface ProjectDetail {

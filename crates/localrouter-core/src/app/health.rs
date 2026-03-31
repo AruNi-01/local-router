@@ -33,13 +33,14 @@ impl AppState {
 
             let healthcheck_url = super::runtime::render_command(&service.healthcheck, port, "");
             loop {
+                let interval = healthcheck_poll_interval(healthcheck_interval_seconds(&app).await);
                 tokio::select! {
                     _ = stop_rx.changed() => {
                         if *stop_rx.borrow() {
                             break;
                         }
                     }
-                    _ = sleep(Duration::from_secs(2)) => {
+                    _ = sleep(interval) => {
                         match evaluate_healthcheck(&app, &healthcheck_url).await {
                             HealthcheckResult::Healthy => {
                                 let _ = app
@@ -182,9 +183,20 @@ async fn evaluate_healthcheck(app: &AppState, healthcheck_url: &str) -> Healthch
     }
 }
 
+pub(crate) async fn healthcheck_interval_seconds(app: &AppState) -> u64 {
+    app.config.read().await.healthcheck_interval
+}
+
+fn healthcheck_poll_interval(interval_secs: u64) -> Duration {
+    Duration::from_secs(interval_secs.max(1))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{HealthcheckResult, evaluate_healthcheck, healthcheck_response_is_ready};
+    use super::{
+        HealthcheckResult, evaluate_healthcheck, healthcheck_poll_interval,
+        healthcheck_response_is_ready,
+    };
     use crate::{AppState, storage::PersistedState};
     use axum::{Router, routing::get};
     use reqwest::StatusCode;
@@ -223,5 +235,17 @@ mod tests {
         let result =
             evaluate_healthcheck(&app, &format!("http://127.0.0.1:{}/", addr.port())).await;
         assert!(matches!(result, HealthcheckResult::Unhealthy(reason) if reason.contains("502")));
+    }
+
+    #[test]
+    fn healthcheck_interval_clamps_to_at_least_one_second() {
+        assert_eq!(
+            healthcheck_poll_interval(0),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            healthcheck_poll_interval(7),
+            std::time::Duration::from_secs(7)
+        );
     }
 }

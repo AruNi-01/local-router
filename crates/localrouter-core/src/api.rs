@@ -491,6 +491,7 @@ mod tests {
         let service = ServiceDef {
             id: "svc-1".to_string(),
             project_id: project.id.clone(),
+            workspace_id: Some(workspace.id.clone()),
             name: "ws".to_string(),
             command: "echo".to_string(),
             protocol: "http".to_string(),
@@ -602,6 +603,7 @@ mod tests {
         let service = ServiceDef {
             id: "svc-1".to_string(),
             project_id: project.id.clone(),
+            workspace_id: Some(workspace.id.clone()),
             name: "web".to_string(),
             command: "echo".to_string(),
             protocol: "http".to_string(),

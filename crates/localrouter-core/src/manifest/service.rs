@@ -14,7 +14,19 @@ pub fn services_from_manifest(
     manifest
         .services
         .iter()
-        .map(|(name, svc)| service_from_manifest(project_id, name, svc))
+        .map(|(name, svc)| service_from_manifest(project_id, None, name, svc))
+        .collect()
+}
+
+pub fn services_from_manifest_for_workspace(
+    project_id: &str,
+    workspace_id: &str,
+    manifest: &ProjectManifest,
+) -> Result<Vec<ServiceDef>> {
+    manifest
+        .services
+        .iter()
+        .map(|(name, svc)| service_from_manifest(project_id, Some(workspace_id), name, svc))
         .collect()
 }
 
@@ -87,6 +99,7 @@ pub fn infer_language(adapter: &str) -> &'static str {
 
 fn service_from_manifest(
     project_id: &str,
+    workspace_id: Option<&str>,
     name: &str,
     svc: &ManifestService,
 ) -> Result<ServiceDef> {
@@ -115,8 +128,15 @@ fn service_from_manifest(
     });
 
     Ok(ServiceDef {
-        id: stable_id("svc", &format!("{project_id}:{name}")),
+        id: stable_id(
+            "svc",
+            &match workspace_id {
+                Some(workspace_id) => format!("{project_id}:{workspace_id}:{name}"),
+                None => format!("{project_id}:{name}"),
+            },
+        ),
         project_id: project_id.to_string(),
+        workspace_id: workspace_id.map(ToString::to_string),
         name: name.to_string(),
         command: svc.command.clone(),
         protocol,

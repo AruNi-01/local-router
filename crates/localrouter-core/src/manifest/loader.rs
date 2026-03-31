@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::models::{Project, now_rfc3339};
+use crate::models::{Project, Workspace, now_rfc3339};
 
 use super::{
     detect::autodetect_manifest,
@@ -10,47 +10,56 @@ use super::{
         KNOWN_ADAPTERS, KNOWN_PROTOCOLS, KNOWN_WORKSPACE_STRATEGIES, ManifestService,
         ProjectManifest,
     },
-    service::services_from_manifest,
+    service::{services_from_manifest, services_from_manifest_for_workspace},
     utils::{is_valid_dns_label, resolve_service_cwd, slugify, stable_id},
-    workspace::detect_workspace,
+    workspace::{detect_workspaces, project_identity},
 };
 
+#[derive(Debug, Clone)]
+pub struct LoadedWorkspace {
+    pub workspace: Workspace,
+    pub services: Vec<crate::models::ServiceDef>,
+}
+
+#[derive(Debug)]
 pub struct LoadedProject {
     pub project: Project,
-    pub workspace: crate::models::Workspace,
+    pub workspaces: Vec<LoadedWorkspace>,
     pub services: Vec<crate::models::ServiceDef>,
     pub manifest: String,
     pub config_source: String,
 }
 
 pub fn load_project(path: &Path) -> Result<LoadedProject> {
+    load_project_with_options(path, true)
+}
+
+pub fn load_project_with_options(path: &Path, allow_autodetect: bool) -> Result<LoadedProject> {
     let canonical = path
         .canonicalize()
         .context("failed to resolve project path")?;
-    let manifest_path = canonical.join("localrouter.yaml");
-    let (manifest, manifest_text, config_source) = if manifest_path.exists() {
-        let raw = fs::read_to_string(&manifest_path).context("failed to read localrouter.yaml")?;
-        let mut parsed: ProjectManifest =
-            serde_yaml::from_str(&raw).context("failed to parse localrouter.yaml")?;
-        if parsed.project.trim().is_empty() {
-            parsed.project = canonical
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("project")
-                .to_string();
-        }
-        validate_manifest(&parsed)?;
-        validate_service_paths(&canonical, &parsed)?;
-        (parsed, raw, "manifest".to_string())
-    } else {
-        let detected = autodetect_manifest(&canonical)?;
-        let yaml = serde_yaml::to_string(&detected).context("failed to render manifest yaml")?;
-        (detected, yaml, "autodetect".to_string())
-    };
+    let (manifest, manifest_text, config_source) =
+        load_manifest_snapshot(&canonical, allow_autodetect)?;
 
     let project_name = manifest.project.clone();
-    let project_id = stable_id("proj", &canonical.to_string_lossy());
-    let workspace = detect_workspace(&project_id, &canonical);
+    let project_id = stable_id("proj", &project_identity(&canonical));
+    let workspaces = detect_workspaces(&project_id, &canonical)
+        .into_iter()
+        .map(|workspace| {
+            let workspace_path = Path::new(&workspace.path);
+            let (workspace_manifest, _, _) =
+                load_manifest_snapshot(workspace_path, allow_autodetect)?;
+            let services = services_from_manifest_for_workspace(
+                &project_id,
+                &workspace.id,
+                &workspace_manifest,
+            )?;
+            Ok(LoadedWorkspace {
+                workspace,
+                services,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let services = services_from_manifest(&project_id, &manifest)?;
 
     Ok(LoadedProject {
@@ -62,11 +71,42 @@ pub fn load_project(path: &Path) -> Result<LoadedProject> {
             config_source: config_source.clone(),
             proxy_disabled: manifest.proxy.disabled.unwrap_or(false),
         },
-        workspace,
+        workspaces,
         services,
         manifest: manifest_text,
         config_source,
     })
+}
+
+fn load_manifest_snapshot(
+    path: &Path,
+    allow_autodetect: bool,
+) -> Result<(ProjectManifest, String, String)> {
+    let manifest_path = path.join("localrouter.yaml");
+    if manifest_path.exists() {
+        let raw = fs::read_to_string(&manifest_path).context("failed to read localrouter.yaml")?;
+        let mut parsed: ProjectManifest =
+            serde_yaml::from_str(&raw).context("failed to parse localrouter.yaml")?;
+        if parsed.project.trim().is_empty() {
+            parsed.project = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("project")
+                .to_string();
+        }
+        validate_manifest(&parsed)?;
+        validate_service_paths(path, &parsed)?;
+        Ok((parsed, raw, "manifest".to_string()))
+    } else if !allow_autodetect {
+        Err(anyhow!(
+            "localrouter.yaml not found at {} and auto-detect is disabled",
+            manifest_path.display()
+        ))
+    } else {
+        let detected = autodetect_manifest(path)?;
+        let yaml = serde_yaml::to_string(&detected).context("failed to render manifest yaml")?;
+        Ok((detected, yaml, "autodetect".to_string()))
+    }
 }
 
 pub fn parse_manifest(raw: &str) -> Result<ProjectManifest> {
@@ -223,8 +263,7 @@ fn validate_command_templates(name: &str, command: &str) -> Result<()> {
 pub fn validate_service_paths(project_path: &Path, manifest: &ProjectManifest) -> Result<()> {
     for (name, svc) in &manifest.services {
         if let Some(ref cwd) = svc.cwd {
-            let resolved =
-                resolve_service_cwd(&project_path.to_string_lossy(), Some(cwd.as_str()));
+            let resolved = resolve_service_cwd(&project_path.to_string_lossy(), Some(cwd.as_str()));
             if !resolved.is_dir() {
                 return Err(anyhow!(
                     "service '{}': cwd '{}' is not an existing directory (resolved to {})",
@@ -246,15 +285,23 @@ pub fn write_manifest_to_disk(project_path: &str, manifest_yaml: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{fs, path::Path, process::Command};
+
+    use tempfile::tempdir;
+
+    use super::{load_project, load_project_with_options, parse_manifest};
 
     #[test]
     fn rejects_invalid_protocol() {
-        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: ftp\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: ftp\n";
         let result = parse_manifest(yaml);
         assert!(result.is_err(), "expected error for protocol 'ftp'");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unknown protocol"), "expected 'unknown protocol' in: {msg}");
+        assert!(
+            msg.contains("unknown protocol"),
+            "expected 'unknown protocol' in: {msg}"
+        );
     }
 
     #[test]
@@ -268,14 +315,20 @@ mod tests {
     fn rejects_missing_depends_on_ref() {
         let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    depends_on:\n      - ghost\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_err(), "expected error for missing depends_on reference");
+        assert!(
+            result.is_err(),
+            "expected error for missing depends_on reference"
+        );
     }
 
     #[test]
     fn rejects_enabled_and_disabled_together() {
         let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    enabled: true\n    disabled: true\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_err(), "expected error for both enabled and disabled");
+        assert!(
+            result.is_err(),
+            "expected error for both enabled and disabled"
+        );
     }
 
     #[test]
@@ -287,16 +340,22 @@ mod tests {
 
     #[test]
     fn rejects_lowercase_template_var() {
-        let yaml = "project: test\nservices:\n  web:\n    command: \"node server.js --port ${port}\"\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: \"node server.js --port ${port}\"\n";
         let result = parse_manifest(yaml);
         assert!(result.is_err(), "expected error for lowercase ${{port}}");
     }
 
     #[test]
     fn accepts_valid_manifest() {
-        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: http\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: http\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_ok(), "expected valid manifest to parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "expected valid manifest to parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -304,5 +363,111 @@ mod tests {
         let yaml = "project: test\nservices: {}\n";
         let result = parse_manifest(yaml);
         assert!(result.is_err(), "expected error for empty services");
+    }
+
+    #[test]
+    fn load_project_requires_manifest_when_autodetect_is_disabled() {
+        let temp = tempdir().unwrap();
+        let result = load_project_with_options(temp.path(), false);
+        assert!(result.is_err(), "expected missing manifest to fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("auto-detect is disabled")
+        );
+    }
+
+    #[test]
+    fn load_project_discovers_linked_worktrees_and_stable_project_id() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+
+        run_git(&root, &["init"]);
+        run_git(&root, &["branch", "-M", "main"]);
+        fs::write(
+            root.join("localrouter.yaml"),
+            "project: demo\nservices:\n  web:\n    command: echo hello\n    protocol: none\n    route: none\n",
+        )
+        .unwrap();
+        run_git(&root, &["add", "localrouter.yaml"]);
+        run_git(
+            &root,
+            &[
+                "-c",
+                "user.name=LocalRouter",
+                "-c",
+                "user.email=localrouter@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        let worktree = temp.path().join("repo-wt");
+        run_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/worktree",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let worktree_canonical = worktree.canonicalize().unwrap();
+        fs::write(
+            worktree.join("localrouter.yaml"),
+            "project: demo\nservices:\n  api:\n    command: echo worktree\n    protocol: none\n    route: none\n",
+        )
+        .unwrap();
+
+        let root_loaded = load_project(&root).unwrap();
+        let worktree_loaded = load_project(&worktree).unwrap();
+
+        assert_eq!(root_loaded.project.id, worktree_loaded.project.id);
+        assert_eq!(root_loaded.workspaces.len(), 2);
+        assert_eq!(worktree_loaded.workspaces.len(), 2);
+        assert!(root_loaded.workspaces.iter().any(|entry| {
+            entry.workspace.path == worktree_canonical.to_string_lossy().as_ref()
+        }));
+        let root_entry = root_loaded
+            .workspaces
+            .iter()
+            .find(|entry| entry.workspace.path == root.canonicalize().unwrap().to_string_lossy())
+            .unwrap();
+        let worktree_entry = root_loaded
+            .workspaces
+            .iter()
+            .find(|entry| entry.workspace.path == worktree_canonical.to_string_lossy())
+            .unwrap();
+        assert_eq!(
+            root_entry
+                .services
+                .iter()
+                .map(|service| service.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["web"]
+        );
+        assert_eq!(
+            worktree_entry
+                .services
+                .iter()
+                .map(|service| service.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["api"]
+        );
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git command failed: {:?}", args);
     }
 }

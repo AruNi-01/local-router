@@ -39,6 +39,7 @@ export default function ProjectDetailPage() {
 
   const { project, workspaces, services, routes } = data;
   const instances = allInstances.filter(i => i.projectId === project.id);
+  const servicesById = new Map(services.map((service) => [service.id, service]));
 
   return (
     <DashboardLayout>
@@ -94,7 +95,14 @@ export default function ProjectDetailPage() {
             {services.map((svc, i) => (
               <div key={svc.id} className={`px-5 py-4 ${i > 0 ? 'border-t border-border' : ''}`}>
                 <div className="flex items-center justify-between">
-                  <p className="text-[13px] font-semibold text-foreground">{svc.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-[13px] font-semibold text-foreground">{svc.name}</p>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                      svc.enabled ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'
+                    }`}>
+                      {svc.enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </div>
                   <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">{svc.adapter}</span>
                 </div>
                 <p className="mt-1.5 text-[12px] font-mono text-muted-foreground/50">{svc.command}</p>
@@ -124,7 +132,16 @@ export default function ProjectDetailPage() {
               <tbody>
                 {instances.map((inst, i) => (
                   <tr key={inst.id} className={`hover:bg-accent/30 transition-colors ${i > 0 ? 'border-t border-border' : ''}`}>
-                    <td className="px-5 py-2.5 font-medium text-foreground">{inst.serviceName}</td>
+                    <td className="px-5 py-2.5 font-medium text-foreground">
+                      <div className="flex items-center gap-2">
+                        <span>{inst.serviceName}</span>
+                        {servicesById.get(inst.serviceId)?.enabled === false && (
+                          <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            Disabled
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-5 py-2.5 text-muted-foreground">{inst.workspaceName}</td>
                     <td className="px-5 py-2.5 font-mono text-[11px] text-muted-foreground tabular-nums">{inst.port || '—'}</td>
                     <td className="px-5 py-2.5 font-mono text-[11px] text-muted-foreground/50 tabular-nums">{inst.pid || '—'}</td>
@@ -158,6 +175,8 @@ export default function ProjectDetailPage() {
                         onRestart={restartInstance}
                         onStop={stopInstance}
                         onStart={startInstance}
+                        disabled={servicesById.get(inst.serviceId)?.enabled === false}
+                        disabledReason={inst.statusReason}
                       />
                     </td>
                   </tr>

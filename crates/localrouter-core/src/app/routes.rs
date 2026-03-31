@@ -124,13 +124,21 @@ pub(crate) fn regenerate_routes_locked(
             .cloned()
             .collect::<Vec<_>>();
         let include_short_alias = project_workspaces.len() == 1;
-        let project_services = services
-            .iter()
-            .filter(|service| service.project_id == project.id && service.route != "none")
-            .cloned()
-            .collect::<Vec<_>>();
 
         for workspace in &project_workspaces {
+            let project_services = services
+                .iter()
+                .filter(|service| {
+                    service.project_id == project.id
+                        && service.route != "none"
+                        && service
+                            .workspace_id
+                            .as_deref()
+                            .map(|id| id == workspace.id)
+                            .unwrap_or(true)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             for service in &project_services {
                 let target = instances
                     .iter()
@@ -252,6 +260,7 @@ mod tests {
         ServiceDef {
             id: "svc-1".to_string(),
             project_id: "proj-1".to_string(),
+            workspace_id: Some("ws-1".to_string()),
             name: "dashboard".to_string(),
             command: "npm run dev -- --port ${PORT}".to_string(),
             protocol: "http".to_string(),

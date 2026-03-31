@@ -302,21 +302,27 @@ impl AppState {
         }
         for service in inner.services.values() {
             for dep in &service.depends_on {
-                if let Some(target) = inner
-                    .services
-                    .values()
-                    .find(|candidate| &candidate.name == dep)
-                {
-                    for workspace in inner
-                        .workspaces
-                        .values()
-                        .filter(|ws| ws.project_id == service.project_id)
-                    {
+                if let Some(target) = inner.services.values().find(|candidate| {
+                    &candidate.name == dep && candidate.workspace_id == service.workspace_id
+                }) {
+                    if let Some(workspace_id) = service.workspace_id.as_deref() {
                         edges.push(GraphEdge {
-                            source: format!("{}::{}", service.id, workspace.id),
-                            target: format!("{}::{}", target.id, workspace.id),
+                            source: format!("{}::{}", service.id, workspace_id),
+                            target: format!("{}::{}", target.id, workspace_id),
                             edge_type: "depends_on".to_string(),
                         });
+                    } else {
+                        for workspace in inner
+                            .workspaces
+                            .values()
+                            .filter(|ws| ws.project_id == service.project_id)
+                        {
+                            edges.push(GraphEdge {
+                                source: format!("{}::{}", service.id, workspace.id),
+                                target: format!("{}::{}", target.id, workspace.id),
+                                edge_type: "depends_on".to_string(),
+                            });
+                        }
                     }
                 }
             }
