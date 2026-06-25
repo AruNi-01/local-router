@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, HashSet},
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     process::Stdio,
     time::Duration,
@@ -10,13 +11,17 @@ use nix::{
     unistd::Pid,
 };
 use serde_json::json;
-use tokio::{process::Command, sync::watch, time::sleep};
+use tokio::{
+    process::Command,
+    sync::watch,
+    time::{Instant, sleep},
+};
 
 use crate::{
     manifest::resolve_service_cwd,
     models::{
-        HealthStatus, Instance, LogEntry, LogLevel, Project, ServiceDef, Workspace, now_rfc3339,
-        uptime_string,
+        HealthStatus, Instance, LogEntry, LogLevel, Project, RouteStatus, ServiceDef, Workspace,
+        now_rfc3339, uptime_string,
     },
 };
 
@@ -26,9 +31,135 @@ use super::{
 };
 
 const LOOPBACK_HOST: &str = "127.0.0.1";
+const DEPENDENCY_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl AppState {
     pub async fn start_instance(&self, instance_id: &str) -> Result<Instance> {
+        let start_order = self.build_instance_start_order(instance_id).await?;
+        let mut requested_instance = None;
+
+        for ordered_instance_id in start_order {
+            let started = self.start_single_instance(&ordered_instance_id).await?;
+            if ordered_instance_id == instance_id {
+                requested_instance = Some(started);
+            } else {
+                self.wait_for_dependency_ready(&ordered_instance_id, DEPENDENCY_READY_TIMEOUT)
+                    .await?;
+            }
+        }
+
+        requested_instance.ok_or_else(|| anyhow!("instance not found"))
+    }
+
+    async fn build_instance_start_order(&self, instance_id: &str) -> Result<Vec<String>> {
+        let inner = self.inner.read().await;
+        let mut visited = HashSet::new();
+        let mut stack = Vec::new();
+        let mut order = Vec::new();
+
+        fn visit(
+            instance_id: &str,
+            inner: &super::RuntimeState,
+            visited: &mut HashSet<String>,
+            stack: &mut Vec<String>,
+            order: &mut Vec<String>,
+        ) -> Result<()> {
+            if visited.contains(instance_id) {
+                return Ok(());
+            }
+            if let Some(cycle_start) = stack.iter().position(|id| id == instance_id) {
+                let mut cycle = stack[cycle_start..].to_vec();
+                cycle.push(instance_id.to_string());
+                return Err(anyhow!(
+                    "service dependency cycle detected: {}",
+                    cycle.join(" -> ")
+                ));
+            }
+
+            let instance = inner
+                .instances
+                .get(instance_id)
+                .ok_or_else(|| anyhow!("instance not found"))?;
+            let service = inner
+                .services
+                .get(&instance.service_id)
+                .ok_or_else(|| anyhow!("service not found"))?;
+
+            stack.push(instance_id.to_string());
+            for dependency_name in &service.depends_on {
+                let dependency_service = inner
+                    .services
+                    .values()
+                    .find(|candidate| {
+                        candidate.project_id == service.project_id
+                            && candidate.name == *dependency_name
+                    })
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "service '{}' depends on missing service '{}'",
+                            service.name,
+                            dependency_name
+                        )
+                    })?;
+                let dependency_instance = inner
+                    .instances
+                    .values()
+                    .find(|candidate| {
+                        candidate.workspace_id == instance.workspace_id
+                            && candidate.service_id == dependency_service.id
+                    })
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "service '{}' depends on '{}' but no instance exists in workspace '{}'",
+                            service.name,
+                            dependency_name,
+                            instance.workspace_name
+                        )
+                    })?;
+                visit(&dependency_instance.id, inner, visited, stack, order)?;
+            }
+            stack.pop();
+
+            visited.insert(instance_id.to_string());
+            order.push(instance_id.to_string());
+            Ok(())
+        }
+
+        visit(instance_id, &inner, &mut visited, &mut stack, &mut order)?;
+        Ok(order)
+    }
+
+    async fn wait_for_dependency_ready(&self, instance_id: &str, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let snapshot = {
+                let inner = self.inner.read().await;
+                inner.instances.get(instance_id).cloned()
+            }
+            .ok_or_else(|| anyhow!("dependency instance not found"))?;
+
+            if snapshot.status == HealthStatus::Healthy {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "dependency '{}' did not become healthy within {}s; last status: {:?}{}",
+                    snapshot.service_name,
+                    timeout.as_secs(),
+                    snapshot.status,
+                    snapshot
+                        .status_reason
+                        .as_deref()
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                ));
+            }
+
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn start_single_instance(&self, instance_id: &str) -> Result<Instance> {
         let config = self.config.read().await.clone();
         let (service, workspace, project, existing_instance) = {
             let inner = self.inner.read().await;
@@ -74,6 +205,9 @@ impl AppState {
         } else {
             format!("http://{host}:{}", config.proxy_port)
         };
+        let runtime_env = self
+            .build_runtime_env(&service, &workspace, port, &public_url)
+            .await?;
         let args = build_runtime_argv(&service, port, &public_url)?;
         let (program, argv) = args
             .split_first()
@@ -86,17 +220,7 @@ impl AppState {
             .current_dir(&cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("PORT", port.to_string())
-            .env("HOST", LOOPBACK_HOST)
-            .env("PUBLIC_URL", &public_url)
-            .env("LOCALROUTER_PORT", port.to_string())
-            .env("LOCALROUTER_HOST", LOOPBACK_HOST)
-            .env("LOCALROUTER_PUBLIC_URL", &public_url)
-            .env("FLASK_RUN_HOST", LOOPBACK_HOST)
-            .env("FLASK_RUN_PORT", port.to_string());
-        for (key, value) in &service.env {
-            process.env(key, value);
-        }
+            .envs(runtime_env);
 
         let mut child = process
             .spawn()
@@ -202,6 +326,104 @@ impl AppState {
             .get(instance_id)
             .cloned()
             .unwrap_or(existing_instance))
+    }
+
+    async fn build_runtime_env(
+        &self,
+        service: &ServiceDef,
+        workspace: &Workspace,
+        port: u16,
+        public_url: &str,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut env = BTreeMap::from([
+            ("PORT".to_string(), port.to_string()),
+            ("HOST".to_string(), LOOPBACK_HOST.to_string()),
+            ("PUBLIC_URL".to_string(), public_url.to_string()),
+            ("LOCALROUTER_PORT".to_string(), port.to_string()),
+            ("LOCALROUTER_HOST".to_string(), LOOPBACK_HOST.to_string()),
+            ("LOCALROUTER_PUBLIC_URL".to_string(), public_url.to_string()),
+            ("FLASK_RUN_HOST".to_string(), LOOPBACK_HOST.to_string()),
+            ("FLASK_RUN_PORT".to_string(), port.to_string()),
+        ]);
+
+        env.extend(self.dependency_service_env(service, workspace).await?);
+        let template_context = env.clone();
+        for (key, value) in &service.env {
+            env.insert(key.clone(), render_env_templates(value, &template_context));
+        }
+
+        Ok(env)
+    }
+
+    async fn dependency_service_env(
+        &self,
+        service: &ServiceDef,
+        workspace: &Workspace,
+    ) -> Result<BTreeMap<String, String>> {
+        let inner = self.inner.read().await;
+        let mut env = BTreeMap::new();
+
+        for dependency_name in &service.depends_on {
+            let dependency_service = inner
+                .services
+                .values()
+                .find(|candidate| {
+                    candidate.project_id == service.project_id && candidate.name == *dependency_name
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "service '{}' depends on missing service '{}'",
+                        service.name,
+                        dependency_name
+                    )
+                })?;
+            let env_name = normalize_service_env_name(&dependency_service.name);
+            if env_name.is_empty() {
+                continue;
+            }
+
+            let dependency_instance = inner
+                .instances
+                .values()
+                .find(|candidate| {
+                    candidate.workspace_id == workspace.id
+                        && candidate.service_id == dependency_service.id
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "service '{}' depends on '{}' but no instance exists in workspace '{}'",
+                        service.name,
+                        dependency_name,
+                        workspace.name
+                    )
+                })?;
+            if dependency_instance.port > 0 {
+                env.insert(
+                    format!("LOCALROUTER_SERVICE_{env_name}_PORT"),
+                    dependency_instance.port.to_string(),
+                );
+            }
+
+            let route_url = (!dependency_instance.url.is_empty())
+                .then(|| dependency_instance.url.clone())
+                .or_else(|| {
+                    inner
+                        .routes
+                        .values()
+                        .find(|route| {
+                            route.workspace_id == workspace.id
+                                && route.service_id == dependency_service.id
+                                && route.status == RouteStatus::Active
+                        })
+                        .map(|route| route.url.clone())
+                        .filter(|url| !url.is_empty())
+                });
+            if let Some(route_url) = route_url {
+                env.insert(format!("LOCALROUTER_SERVICE_{env_name}_URL"), route_url);
+            }
+        }
+
+        Ok(env)
     }
 
     pub async fn stop_instance(&self, instance_id: &str) -> Result<Instance> {
@@ -575,6 +797,31 @@ pub(crate) fn render_command(input: &str, port: u16, public_url: &str) -> String
         .replace("${PUBLIC_URL}", public_url)
 }
 
+pub(crate) fn normalize_service_env_name(service_name: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_separator = false;
+
+    for ch in service_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_uppercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator && !output.is_empty() {
+            output.push('_');
+            previous_was_separator = true;
+        }
+    }
+
+    output.trim_matches('_').to_string()
+}
+
+pub(crate) fn render_env_templates(input: &str, context: &BTreeMap<String, String>) -> String {
+    let mut rendered = input.to_string();
+    for (key, value) in context {
+        rendered = rendered.replace(&format!("${{{key}}}"), value);
+    }
+    rendered
+}
+
 fn instance_source(project: &Project, service: &ServiceDef, workspace: &Workspace) -> String {
     if workspace.name == "main" {
         format!("{}/{}", project.name, service.name)
@@ -585,8 +832,16 @@ fn instance_source(project: &Project, service: &ServiceDef, workspace: &Workspac
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         LOOPBACK_HOST, ServiceDef, build_runtime_argv, find_free_loopback_port, is_port_available,
+        normalize_service_env_name, render_env_templates,
+    };
+    use crate::{
+        AppState,
+        models::{HealthStatus, Instance, Project, Route, RouteStatus, Workspace, now_rfc3339},
+        storage::PersistedState,
     };
 
     fn sample_service(command: &str, adapter: &str) -> ServiceDef {
@@ -604,6 +859,69 @@ mod tests {
             env: Default::default(),
             depends_on: Vec::new(),
             enabled: true,
+        }
+    }
+
+    fn sample_project() -> Project {
+        Project {
+            id: "proj_1".to_string(),
+            name: "demo".to_string(),
+            path: "/tmp/demo".to_string(),
+            created_at: now_rfc3339(),
+            config_source: "manifest".to_string(),
+            proxy_disabled: false,
+        }
+    }
+
+    fn sample_workspace() -> Workspace {
+        Workspace {
+            id: "ws_1".to_string(),
+            project_id: "proj_1".to_string(),
+            name: "feature-login".to_string(),
+            branch: "feature/login".to_string(),
+            path: "/tmp/demo-worktree".to_string(),
+            is_active: true,
+            slug: "feature-login".to_string(),
+        }
+    }
+
+    fn service_with_deps(id: &str, name: &str, route: &str, depends_on: Vec<&str>) -> ServiceDef {
+        ServiceDef {
+            id: id.to_string(),
+            project_id: "proj_1".to_string(),
+            name: name.to_string(),
+            command: "node server.js".to_string(),
+            protocol: "http".to_string(),
+            adapter: "express".to_string(),
+            route: route.to_string(),
+            healthcheck: "http://127.0.0.1:${PORT}".to_string(),
+            language: "typescript".to_string(),
+            cwd: None,
+            env: Default::default(),
+            depends_on: depends_on.into_iter().map(str::to_string).collect(),
+            enabled: true,
+        }
+    }
+
+    fn stopped_instance(id: &str, service: &ServiceDef, workspace: &Workspace) -> Instance {
+        Instance {
+            id: id.to_string(),
+            service_id: service.id.clone(),
+            service_name: service.name.clone(),
+            workspace_id: workspace.id.clone(),
+            workspace_name: workspace.name.clone(),
+            project_id: "proj_1".to_string(),
+            project_name: "demo".to_string(),
+            port: 0,
+            pid: 0,
+            status: HealthStatus::Stopped,
+            url: String::new(),
+            uptime: "—".to_string(),
+            cpu: 0.0,
+            memory: 0,
+            started_at: None,
+            last_exit: None,
+            status_reason: None,
         }
     }
 
@@ -692,5 +1010,118 @@ mod tests {
         let port = find_free_loopback_port(&[]).unwrap();
         assert_ne!(port, 0);
         assert!(is_port_available(port));
+    }
+
+    #[test]
+    fn normalizes_service_names_for_env_keys() {
+        assert_eq!(normalize_service_env_name("api-server"), "API_SERVER");
+        assert_eq!(normalize_service_env_name("api.server"), "API_SERVER");
+        assert_eq!(normalize_service_env_name("--api server--"), "API_SERVER");
+    }
+
+    #[test]
+    fn renders_env_templates_from_context() {
+        let context = BTreeMap::from([
+            (
+                "LOCALROUTER_SERVICE_API_URL".to_string(),
+                "http://feature-login.api.demo.localhost:9730".to_string(),
+            ),
+            ("PORT".to_string(), "4123".to_string()),
+        ]);
+
+        assert_eq!(
+            render_env_templates("${LOCALROUTER_SERVICE_API_URL}/v1/${PORT}", &context),
+            "http://feature-login.api.demo.localhost:9730/v1/4123"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_start_order_places_dependencies_first() {
+        let project = sample_project();
+        let workspace = sample_workspace();
+        let api = service_with_deps("svc_api", "api", "api", Vec::new());
+        let web = service_with_deps("svc_web", "web", "web", vec!["api"]);
+        let api_instance = stopped_instance("inst_api", &api, &workspace);
+        let web_instance = stopped_instance("inst_web", &web, &workspace);
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![project],
+            workspaces: vec![workspace],
+            services: vec![api, web],
+            instances: vec![api_instance, web_instance],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let order = app.build_instance_start_order("inst_web").await.unwrap();
+
+        assert_eq!(order, vec!["inst_api", "inst_web"]);
+    }
+
+    #[tokio::test]
+    async fn dependency_env_injects_peer_url_and_renders_service_env() {
+        let project = sample_project();
+        let workspace = sample_workspace();
+        let api = service_with_deps("svc_api", "api-server", "api", Vec::new());
+        let mut web = service_with_deps("svc_web", "web", "web", vec!["api-server"]);
+        web.env.insert(
+            "VITE_API_BASE_URL".to_string(),
+            "${LOCALROUTER_SERVICE_API_SERVER_URL}".to_string(),
+        );
+        let mut api_instance = stopped_instance("inst_api", &api, &workspace);
+        api_instance.port = 4100;
+        api_instance.pid = 42;
+        api_instance.status = HealthStatus::Healthy;
+        api_instance.url = "http://feature-login.api.demo.localhost:9730".to_string();
+        let web_instance = stopped_instance("inst_web", &web, &workspace);
+        let route = Route {
+            id: "rt_api".to_string(),
+            pattern: "feature-login.api.demo.localhost".to_string(),
+            url: api_instance.url.clone(),
+            target: "127.0.0.1:4100".to_string(),
+            service_id: api.id.clone(),
+            service_name: api.name.clone(),
+            workspace_id: workspace.id.clone(),
+            workspace_name: workspace.name.clone(),
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            status: RouteStatus::Active,
+            conflict_reason: None,
+        };
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![project],
+            workspaces: vec![workspace.clone()],
+            services: vec![api, web.clone()],
+            instances: vec![api_instance, web_instance],
+            routes: vec![route],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let env = app
+            .build_runtime_env(
+                &web,
+                &workspace,
+                4200,
+                "http://feature-login.web.demo.localhost:9730",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.get("LOCALROUTER_SERVICE_API_SERVER_URL")
+                .map(String::as_str),
+            Some("http://feature-login.api.demo.localhost:9730")
+        );
+        assert_eq!(
+            env.get("LOCALROUTER_SERVICE_API_SERVER_PORT")
+                .map(String::as_str),
+            Some("4100")
+        );
+        assert_eq!(
+            env.get("VITE_API_BASE_URL").map(String::as_str),
+            Some("http://feature-login.api.demo.localhost:9730")
+        );
     }
 }

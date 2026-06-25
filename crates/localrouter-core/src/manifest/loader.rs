@@ -120,6 +120,7 @@ pub fn validate_manifest(manifest: &ProjectManifest) -> Result<()> {
             route_slugs.insert(slug, name.clone());
         }
     }
+    validate_dependency_cycles(&manifest.services)?;
     Ok(())
 }
 
@@ -220,11 +221,51 @@ fn validate_command_templates(name: &str, command: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_dependency_cycles(services: &BTreeMap<String, ManifestService>) -> Result<()> {
+    let mut visited = BTreeMap::<String, bool>::new();
+    let mut stack = Vec::<String>::new();
+
+    fn visit(
+        name: &str,
+        services: &BTreeMap<String, ManifestService>,
+        visited: &mut BTreeMap<String, bool>,
+        stack: &mut Vec<String>,
+    ) -> Result<()> {
+        if visited.get(name).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        if let Some(cycle_start) = stack.iter().position(|item| item == name) {
+            let mut cycle = stack[cycle_start..].to_vec();
+            cycle.push(name.to_string());
+            return Err(anyhow!(
+                "service dependency cycle detected: {}",
+                cycle.join(" -> ")
+            ));
+        }
+
+        let service = services
+            .get(name)
+            .ok_or_else(|| anyhow!("service '{}' is missing", name))?;
+        stack.push(name.to_string());
+        for dependency in &service.depends_on {
+            visit(dependency, services, visited, stack)?;
+        }
+        stack.pop();
+        visited.insert(name.to_string(), true);
+        Ok(())
+    }
+
+    for name in services.keys() {
+        visit(name, services, &mut visited, &mut stack)?;
+    }
+
+    Ok(())
+}
+
 pub fn validate_service_paths(project_path: &Path, manifest: &ProjectManifest) -> Result<()> {
     for (name, svc) in &manifest.services {
         if let Some(ref cwd) = svc.cwd {
-            let resolved =
-                resolve_service_cwd(&project_path.to_string_lossy(), Some(cwd.as_str()));
+            let resolved = resolve_service_cwd(&project_path.to_string_lossy(), Some(cwd.as_str()));
             if !resolved.is_dir() {
                 return Err(anyhow!(
                     "service '{}': cwd '{}' is not an existing directory (resolved to {})",
@@ -250,11 +291,15 @@ mod tests {
 
     #[test]
     fn rejects_invalid_protocol() {
-        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: ftp\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: ftp\n";
         let result = parse_manifest(yaml);
         assert!(result.is_err(), "expected error for protocol 'ftp'");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unknown protocol"), "expected 'unknown protocol' in: {msg}");
+        assert!(
+            msg.contains("unknown protocol"),
+            "expected 'unknown protocol' in: {msg}"
+        );
     }
 
     #[test]
@@ -268,14 +313,43 @@ mod tests {
     fn rejects_missing_depends_on_ref() {
         let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    depends_on:\n      - ghost\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_err(), "expected error for missing depends_on reference");
+        assert!(
+            result.is_err(),
+            "expected error for missing depends_on reference"
+        );
+    }
+
+    #[test]
+    fn rejects_depends_on_cycles() {
+        let yaml = r#"
+project: test
+services:
+  web:
+    command: node web.js
+    depends_on:
+      - api
+  api:
+    command: node api.js
+    depends_on:
+      - web
+"#;
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for dependency cycle");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("dependency cycle"),
+            "expected dependency cycle in: {msg}"
+        );
     }
 
     #[test]
     fn rejects_enabled_and_disabled_together() {
         let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    enabled: true\n    disabled: true\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_err(), "expected error for both enabled and disabled");
+        assert!(
+            result.is_err(),
+            "expected error for both enabled and disabled"
+        );
     }
 
     #[test]
@@ -287,16 +361,22 @@ mod tests {
 
     #[test]
     fn rejects_lowercase_template_var() {
-        let yaml = "project: test\nservices:\n  web:\n    command: \"node server.js --port ${port}\"\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: \"node server.js --port ${port}\"\n";
         let result = parse_manifest(yaml);
         assert!(result.is_err(), "expected error for lowercase ${{port}}");
     }
 
     #[test]
     fn accepts_valid_manifest() {
-        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: http\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: http\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_ok(), "expected valid manifest to parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "expected valid manifest to parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
