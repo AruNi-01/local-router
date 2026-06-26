@@ -129,6 +129,7 @@ export interface DaemonConfig {
   dnsSuffix: string;
   logLevel: string;
   healthcheckInterval: number;
+  dependencyReadyTimeout: number;
   autoDetect: boolean;
   hotReload: boolean;
 }

@@ -11,4 +11,4 @@ pub use loader::{
 };
 pub use schema::{ManifestProxy, ManifestService, ProjectManifest, WorkspaceStrategy};
 pub use service::services_from_manifest;
-pub use utils::{resolve_service_cwd, slugify, stable_id};
+pub use utils::{normalize_service_env_name, resolve_service_cwd, slugify, stable_id};

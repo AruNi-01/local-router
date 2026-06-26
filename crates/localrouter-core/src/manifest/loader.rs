@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -11,7 +15,9 @@ use super::{
         ProjectManifest,
     },
     service::services_from_manifest,
-    utils::{is_valid_dns_label, resolve_service_cwd, slugify, stable_id},
+    utils::{
+        is_valid_dns_label, normalize_service_env_name, resolve_service_cwd, slugify, stable_id,
+    },
     workspace::detect_workspace,
 };
 
@@ -120,6 +126,8 @@ pub fn validate_manifest(manifest: &ProjectManifest) -> Result<()> {
             route_slugs.insert(slug, name.clone());
         }
     }
+    validate_dependency_cycles(&manifest.services)?;
+    validate_dependency_env_name_collisions(&manifest.services)?;
     Ok(())
 }
 
@@ -220,11 +228,84 @@ fn validate_command_templates(name: &str, command: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_dependency_cycles(services: &BTreeMap<String, ManifestService>) -> Result<()> {
+    let mut visited = BTreeSet::<String>::new();
+    let mut stack = Vec::<String>::new();
+
+    fn visit(
+        name: &str,
+        services: &BTreeMap<String, ManifestService>,
+        visited: &mut BTreeSet<String>,
+        stack: &mut Vec<String>,
+    ) -> Result<()> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+        if let Some(cycle_start) = stack.iter().position(|item| item == name) {
+            let mut cycle = stack[cycle_start..].to_vec();
+            cycle.push(name.to_string());
+            return Err(anyhow!(
+                "service dependency cycle detected: {}",
+                cycle.join(" -> ")
+            ));
+        }
+
+        let service = services
+            .get(name)
+            .ok_or_else(|| anyhow!("service '{}' is missing", name))?;
+        stack.push(name.to_string());
+        for dependency in &service.depends_on {
+            visit(dependency, services, visited, stack)?;
+        }
+        stack.pop();
+        visited.insert(name.to_string());
+        Ok(())
+    }
+
+    for name in services.keys() {
+        visit(name, services, &mut visited, &mut stack)?;
+    }
+
+    Ok(())
+}
+
+fn validate_dependency_env_name_collisions(
+    services: &BTreeMap<String, ManifestService>,
+) -> Result<()> {
+    for (name, service) in services {
+        let mut dependency_by_env_name = BTreeMap::<String, String>::new();
+        for dependency in &service.depends_on {
+            let env_name = normalize_service_env_name(dependency);
+            if env_name.is_empty() {
+                return Err(anyhow!(
+                    "service '{}': dependency '{}' normalizes to an empty LOCALROUTER_SERVICE suffix",
+                    name,
+                    dependency
+                ));
+            }
+            if let Some(existing) = dependency_by_env_name.get(&env_name) {
+                if existing != dependency {
+                    return Err(anyhow!(
+                        "service '{}': dependencies '{}' and '{}' both normalize to LOCALROUTER_SERVICE_{}",
+                        name,
+                        existing,
+                        dependency,
+                        env_name
+                    ));
+                }
+                continue;
+            }
+            dependency_by_env_name.insert(env_name, dependency.clone());
+        }
+    }
+
+    Ok(())
+}
+
 pub fn validate_service_paths(project_path: &Path, manifest: &ProjectManifest) -> Result<()> {
     for (name, svc) in &manifest.services {
         if let Some(ref cwd) = svc.cwd {
-            let resolved =
-                resolve_service_cwd(&project_path.to_string_lossy(), Some(cwd.as_str()));
+            let resolved = resolve_service_cwd(&project_path.to_string_lossy(), Some(cwd.as_str()));
             if !resolved.is_dir() {
                 return Err(anyhow!(
                     "service '{}': cwd '{}' is not an existing directory (resolved to {})",
@@ -250,11 +331,15 @@ mod tests {
 
     #[test]
     fn rejects_invalid_protocol() {
-        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: ftp\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: ftp\n";
         let result = parse_manifest(yaml);
         assert!(result.is_err(), "expected error for protocol 'ftp'");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unknown protocol"), "expected 'unknown protocol' in: {msg}");
+        assert!(
+            msg.contains("unknown protocol"),
+            "expected 'unknown protocol' in: {msg}"
+        );
     }
 
     #[test]
@@ -268,14 +353,97 @@ mod tests {
     fn rejects_missing_depends_on_ref() {
         let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    depends_on:\n      - ghost\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_err(), "expected error for missing depends_on reference");
+        assert!(
+            result.is_err(),
+            "expected error for missing depends_on reference"
+        );
+    }
+
+    #[test]
+    fn rejects_depends_on_cycles() {
+        let yaml = r#"
+project: test
+services:
+  web:
+    command: node web.js
+    depends_on:
+      - api
+  api:
+    command: node api.js
+    depends_on:
+      - web
+"#;
+        let result = parse_manifest(yaml);
+        assert!(result.is_err(), "expected error for dependency cycle");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("dependency cycle"),
+            "expected dependency cycle in: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_dependency_env_name_collisions() {
+        let yaml = r#"
+project: test
+services:
+  web:
+    command: node web.js
+    depends_on:
+      - api-server
+      - api.server
+  api-server:
+    command: node api-dash.js
+    route: api-dash
+  api.server:
+    command: node api-dot.js
+    route: api-dot
+"#;
+        let result = parse_manifest(yaml);
+        assert!(
+            result.is_err(),
+            "expected error for dependency env collision"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("LOCALROUTER_SERVICE_API_SERVER"),
+            "expected normalized env name in: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_dependency_env_name() {
+        let yaml = r#"
+project: test
+services:
+  web:
+    command: node web.js
+    depends_on:
+      - "---"
+  "---":
+    command: node dash.js
+    route: dash-service
+"#;
+        let result = parse_manifest(yaml);
+        assert!(
+            result.is_err(),
+            "expected error for empty dependency env name"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("empty LOCALROUTER_SERVICE suffix"),
+            "expected empty env suffix error in: {msg}"
+        );
     }
 
     #[test]
     fn rejects_enabled_and_disabled_together() {
         let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    enabled: true\n    disabled: true\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_err(), "expected error for both enabled and disabled");
+        assert!(
+            result.is_err(),
+            "expected error for both enabled and disabled"
+        );
     }
 
     #[test]
@@ -287,16 +455,22 @@ mod tests {
 
     #[test]
     fn rejects_lowercase_template_var() {
-        let yaml = "project: test\nservices:\n  web:\n    command: \"node server.js --port ${port}\"\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: \"node server.js --port ${port}\"\n";
         let result = parse_manifest(yaml);
         assert!(result.is_err(), "expected error for lowercase ${{port}}");
     }
 
     #[test]
     fn accepts_valid_manifest() {
-        let yaml = "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: http\n";
+        let yaml =
+            "project: test\nservices:\n  web:\n    command: node server.js\n    protocol: http\n";
         let result = parse_manifest(yaml);
-        assert!(result.is_ok(), "expected valid manifest to parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "expected valid manifest to parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]

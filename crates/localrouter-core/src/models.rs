@@ -170,8 +170,14 @@ pub struct DaemonConfig {
     pub dns_suffix: String,
     pub log_level: String,
     pub healthcheck_interval: u64,
+    #[serde(default = "default_dependency_ready_timeout")]
+    pub dependency_ready_timeout: u64,
     pub auto_detect: bool,
     pub hot_reload: bool,
+}
+
+fn default_dependency_ready_timeout() -> u64 {
+    30
 }
 
 impl Default for DaemonConfig {
@@ -182,6 +188,7 @@ impl Default for DaemonConfig {
             dns_suffix: ".localhost".to_string(),
             log_level: "info".to_string(),
             healthcheck_interval: 10,
+            dependency_ready_timeout: default_dependency_ready_timeout(),
             auto_detect: true,
             hot_reload: false,
         }
