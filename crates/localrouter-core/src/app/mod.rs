@@ -48,6 +48,7 @@ pub struct AppState {
     config: Arc<RwLock<DaemonConfig>>,
     events: broadcast::Sender<EventsEnvelope>,
     health_tasks: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    start_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     client: Client,
 }
 
@@ -95,6 +96,7 @@ impl AppState {
             config: Arc::new(RwLock::new(persisted.config)),
             events,
             health_tasks: Arc::new(Mutex::new(HashMap::new())),
+            start_locks: Arc::new(Mutex::new(HashMap::new())),
             client: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,

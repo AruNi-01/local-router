@@ -277,7 +277,11 @@ fn validate_dependency_env_name_collisions(
         for dependency in &service.depends_on {
             let env_name = normalize_service_env_name(dependency);
             if env_name.is_empty() {
-                continue;
+                return Err(anyhow!(
+                    "service '{}': dependency '{}' normalizes to an empty LOCALROUTER_SERVICE suffix",
+                    name,
+                    dependency
+                ));
             }
             if let Some(existing) = dependency_by_env_name.get(&env_name) {
                 if existing != dependency {
@@ -404,6 +408,31 @@ services:
         assert!(
             msg.contains("LOCALROUTER_SERVICE_API_SERVER"),
             "expected normalized env name in: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_dependency_env_name() {
+        let yaml = r#"
+project: test
+services:
+  web:
+    command: node web.js
+    depends_on:
+      - "---"
+  "---":
+    command: node dash.js
+    route: dash-service
+"#;
+        let result = parse_manifest(yaml);
+        assert!(
+            result.is_err(),
+            "expected error for empty dependency env name"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("empty LOCALROUTER_SERVICE suffix"),
+            "expected empty env suffix error in: {msg}"
         );
     }
 

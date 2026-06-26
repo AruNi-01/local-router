@@ -199,6 +199,10 @@ The short variable name is derived from the service name:
 
 Example: `api-server` becomes `API_SERVER`.
 
+If a dependency name normalizes to an empty value, the manifest must fail
+validation because LocalRouter cannot create a stable
+`LOCALROUTER_SERVICE_<NAME>` variable for it.
+
 If two dependencies for the same service normalize to the same variable name,
 the manifest must fail validation. For example, depending on both `api-server`
 and `api.server` would make `LOCALROUTER_SERVICE_API_SERVER_URL` ambiguous, so

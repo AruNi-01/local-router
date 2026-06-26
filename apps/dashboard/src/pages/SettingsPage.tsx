@@ -344,6 +344,10 @@ export default function SettingsPage() {
                 <Label>Healthcheck Interval</Label>
                 <Input type="number" value={config.healthcheckInterval} onChange={(e) => setConfig({ ...config, healthcheckInterval: Number(e.target.value) })} />
               </div>
+              <div className="space-y-2">
+                <Label>Dependency Ready Timeout</Label>
+                <Input type="number" value={config.dependencyReadyTimeout} onChange={(e) => setConfig({ ...config, dependencyReadyTimeout: Number(e.target.value) })} />
+              </div>
             </motion.div>
           </motion.div>
         )}

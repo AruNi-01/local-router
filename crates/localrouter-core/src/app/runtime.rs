@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 
@@ -141,6 +142,21 @@ impl AppState {
             if snapshot.status == HealthStatus::Healthy {
                 return Ok(());
             }
+            if matches!(
+                snapshot.status,
+                HealthStatus::Unhealthy | HealthStatus::Stopped
+            ) {
+                return Err(anyhow!(
+                    "dependency '{}' reached terminal status {:?} before becoming healthy{}",
+                    snapshot.service_name,
+                    snapshot.status,
+                    snapshot
+                        .status_reason
+                        .as_deref()
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                ));
+            }
             if Instant::now() >= deadline {
                 return Err(anyhow!(
                     "dependency '{}' did not become healthy within {}s; last status: {:?}{}",
@@ -160,6 +176,9 @@ impl AppState {
     }
 
     async fn start_single_instance(&self, instance_id: &str) -> Result<Instance> {
+        let start_lock = self.instance_start_lock(instance_id).await;
+        let _start_guard = start_lock.lock().await;
+
         let config = self.config.read().await.clone();
         let (service, workspace, project, existing_instance) = {
             let inner = self.inner.read().await;
@@ -381,7 +400,11 @@ impl AppState {
                 })?;
             let env_name = normalize_service_env_name(&dependency_service.name);
             if env_name.is_empty() {
-                continue;
+                return Err(anyhow!(
+                    "service '{}': dependency '{}' normalizes to an empty LOCALROUTER_SERVICE suffix",
+                    service.name,
+                    dependency_service.name
+                ));
             }
             if let Some(existing) = dependency_by_env_name.get(&env_name) {
                 if existing != &dependency_service.name {
@@ -450,6 +473,14 @@ impl AppState {
         }
 
         Ok(env)
+    }
+
+    async fn instance_start_lock(&self, instance_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut start_locks = self.start_locks.lock().await;
+        start_locks
+            .entry(instance_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     pub async fn stop_instance(&self, instance_id: &str) -> Result<Instance> {
@@ -841,7 +872,7 @@ fn instance_source(project: &Project, service: &ServiceDef, workspace: &Workspac
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, time::Duration};
 
     use super::{
         LOOPBACK_HOST, ServiceDef, build_runtime_argv, find_free_loopback_port, is_port_available,
@@ -1208,6 +1239,73 @@ mod tests {
             env.get("LOCALROUTER_SERVICE_WORKER_URL")
                 .map(String::as_str),
             Some("http://127.0.0.1:4321")
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_env_rejects_empty_normalized_names() {
+        let project = sample_project();
+        let workspace = sample_workspace();
+        let service = service_with_deps("svc_empty", "---", "dash-service", Vec::new());
+        let web = service_with_deps("svc_web", "web", "web", vec!["---"]);
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![project],
+            workspaces: vec![workspace.clone()],
+            services: vec![service.clone(), web.clone()],
+            instances: vec![
+                stopped_instance("inst_empty", &service, &workspace),
+                stopped_instance("inst_web", &web, &workspace),
+            ],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let error = app
+            .build_runtime_env(
+                &web,
+                &workspace,
+                4200,
+                "http://feature-login.web.demo.localhost:9730",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("empty LOCALROUTER_SERVICE suffix"),
+            "expected empty env suffix error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_wait_fails_fast_for_terminal_status() {
+        let project = sample_project();
+        let workspace = sample_workspace();
+        let api = service_with_deps("svc_api", "api", "api", Vec::new());
+        let mut api_instance = stopped_instance("inst_api", &api, &workspace);
+        api_instance.status = HealthStatus::Unhealthy;
+        api_instance.status_reason = Some("Process exited with code 1.".to_string());
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![project],
+            workspaces: vec![workspace],
+            services: vec![api],
+            instances: vec![api_instance],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let error = app
+            .wait_for_dependency_ready("inst_api", Duration::from_secs(30))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("terminal status Unhealthy")
+                && error.contains("Process exited with code 1."),
+            "expected terminal status error with reason, got: {error}"
         );
     }
 }
