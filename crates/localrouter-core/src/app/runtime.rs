@@ -18,7 +18,7 @@ use tokio::{
 };
 
 use crate::{
-    manifest::resolve_service_cwd,
+    manifest::{normalize_service_env_name, resolve_service_cwd},
     models::{
         HealthStatus, Instance, LogEntry, LogLevel, Project, RouteStatus, ServiceDef, Workspace,
         now_rfc3339, uptime_string,
@@ -31,10 +31,10 @@ use super::{
 };
 
 const LOOPBACK_HOST: &str = "127.0.0.1";
-const DEPENDENCY_READY_TIMEOUT: Duration = Duration::from_secs(30);
-
 impl AppState {
     pub async fn start_instance(&self, instance_id: &str) -> Result<Instance> {
+        let dependency_ready_timeout =
+            Duration::from_secs(self.config.read().await.dependency_ready_timeout);
         let start_order = self.build_instance_start_order(instance_id).await?;
         let mut requested_instance = None;
 
@@ -43,7 +43,7 @@ impl AppState {
             if ordered_instance_id == instance_id {
                 requested_instance = Some(started);
             } else {
-                self.wait_for_dependency_ready(&ordered_instance_id, DEPENDENCY_READY_TIMEOUT)
+                self.wait_for_dependency_ready(&ordered_instance_id, dependency_ready_timeout)
                     .await?;
             }
         }
@@ -362,6 +362,8 @@ impl AppState {
     ) -> Result<BTreeMap<String, String>> {
         let inner = self.inner.read().await;
         let mut env = BTreeMap::new();
+        let mut dependency_services = Vec::new();
+        let mut dependency_by_env_name = BTreeMap::<String, String>::new();
 
         for dependency_name in &service.depends_on {
             let dependency_service = inner
@@ -381,7 +383,27 @@ impl AppState {
             if env_name.is_empty() {
                 continue;
             }
+            if let Some(existing) = dependency_by_env_name.get(&env_name) {
+                if existing != &dependency_service.name {
+                    return Err(anyhow!(
+                        "service '{}': dependencies '{}' and '{}' both normalize to LOCALROUTER_SERVICE_{}",
+                        service.name,
+                        existing,
+                        dependency_service.name,
+                        env_name
+                    ));
+                }
+                continue;
+            }
+            dependency_by_env_name.insert(env_name.clone(), dependency_service.name.clone());
+            dependency_services.push((
+                dependency_name.clone(),
+                dependency_service.clone(),
+                env_name,
+            ));
+        }
 
+        for (dependency_name, dependency_service, env_name) in dependency_services {
             let dependency_instance = inner
                 .instances
                 .values()
@@ -417,6 +439,10 @@ impl AppState {
                         })
                         .map(|route| route.url.clone())
                         .filter(|url| !url.is_empty())
+                })
+                .or_else(|| {
+                    (dependency_instance.port > 0)
+                        .then(|| format!("http://127.0.0.1:{}", dependency_instance.port))
                 });
             if let Some(route_url) = route_url {
                 env.insert(format!("LOCALROUTER_SERVICE_{env_name}_URL"), route_url);
@@ -797,23 +823,6 @@ pub(crate) fn render_command(input: &str, port: u16, public_url: &str) -> String
         .replace("${PUBLIC_URL}", public_url)
 }
 
-pub(crate) fn normalize_service_env_name(service_name: &str) -> String {
-    let mut output = String::new();
-    let mut previous_was_separator = false;
-
-    for ch in service_name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            output.push(ch.to_ascii_uppercase());
-            previous_was_separator = false;
-        } else if !previous_was_separator && !output.is_empty() {
-            output.push('_');
-            previous_was_separator = true;
-        }
-    }
-
-    output.trim_matches('_').to_string()
-}
-
 pub(crate) fn render_env_templates(input: &str, context: &BTreeMap<String, String>) -> String {
     let mut rendered = input.to_string();
     for (key, value) in context {
@@ -836,10 +845,11 @@ mod tests {
 
     use super::{
         LOOPBACK_HOST, ServiceDef, build_runtime_argv, find_free_loopback_port, is_port_available,
-        normalize_service_env_name, render_env_templates,
+        render_env_templates,
     };
     use crate::{
         AppState,
+        manifest::normalize_service_env_name,
         models::{HealthStatus, Instance, Project, Route, RouteStatus, Workspace, now_rfc3339},
         storage::PersistedState,
     };
@@ -1122,6 +1132,82 @@ mod tests {
         assert_eq!(
             env.get("VITE_API_BASE_URL").map(String::as_str),
             Some("http://feature-login.api.demo.localhost:9730")
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_env_rejects_normalized_name_collisions() {
+        let project = sample_project();
+        let workspace = sample_workspace();
+        let api_dash = service_with_deps("svc_api_dash", "api-server", "api-dash", Vec::new());
+        let api_dot = service_with_deps("svc_api_dot", "api.server", "api-dot", Vec::new());
+        let web = service_with_deps("svc_web", "web", "web", vec!["api-server", "api.server"]);
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![project],
+            workspaces: vec![workspace.clone()],
+            services: vec![api_dash.clone(), api_dot.clone(), web.clone()],
+            instances: vec![
+                stopped_instance("inst_api_dash", &api_dash, &workspace),
+                stopped_instance("inst_api_dot", &api_dot, &workspace),
+                stopped_instance("inst_web", &web, &workspace),
+            ],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let error = app
+            .build_runtime_env(
+                &web,
+                &workspace,
+                4200,
+                "http://feature-login.web.demo.localhost:9730",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("both normalize to LOCALROUTER_SERVICE_API_SERVER"),
+            "expected env name collision error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_env_falls_back_to_loopback_url_for_non_routed_dependencies() {
+        let project = sample_project();
+        let workspace = sample_workspace();
+        let worker = service_with_deps("svc_worker", "worker", "none", Vec::new());
+        let web = service_with_deps("svc_web", "web", "web", vec!["worker"]);
+        let mut worker_instance = stopped_instance("inst_worker", &worker, &workspace);
+        worker_instance.port = 4321;
+        worker_instance.pid = 43;
+        worker_instance.status = HealthStatus::Healthy;
+        let web_instance = stopped_instance("inst_web", &web, &workspace);
+        let app = AppState::for_tests(PersistedState {
+            projects: vec![project],
+            workspaces: vec![workspace.clone()],
+            services: vec![worker, web.clone()],
+            instances: vec![worker_instance, web_instance],
+            ..PersistedState::default()
+        })
+        .await
+        .unwrap();
+
+        let env = app
+            .build_runtime_env(
+                &web,
+                &workspace,
+                4200,
+                "http://feature-login.web.demo.localhost:9730",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            env.get("LOCALROUTER_SERVICE_WORKER_URL")
+                .map(String::as_str),
+            Some("http://127.0.0.1:4321")
         );
     }
 }

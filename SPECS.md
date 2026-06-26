@@ -159,6 +159,10 @@ Supported service fields:
 `route: none` disables public routing for a service but still allows process
 supervision, logs, and health state.
 
+`enabled` and `disabled` are mutually exclusive aliases for whether a service
+definition participates in runtime operations. Use one or the other; manifests
+that set both must fail validation instead of applying precedence rules.
+
 ## Adapter Contract
 
 Adapters are responsible for making common frameworks bind to the allocated
@@ -195,6 +199,11 @@ The short variable name is derived from the service name:
 
 Example: `api-server` becomes `API_SERVER`.
 
+If two dependencies for the same service normalize to the same variable name,
+the manifest must fail validation. For example, depending on both `api-server`
+and `api.server` would make `LOCALROUTER_SERVICE_API_SERVER_URL` ambiguous, so
+LocalRouter rejects that dependency set instead of overwriting either value.
+
 For compatibility with existing app conventions, the manifest should allow env
 template mapping:
 
@@ -220,7 +229,8 @@ When starting a service:
 1. Resolve `depends_on` within the same project.
 2. Start dependencies first if they are not already running.
 3. Wait until dependency health is `healthy` or until the dependency reaches a
-   configurable timeout.
+   timeout from daemon config `dependencyReadyTimeout`; the default is 30
+   seconds.
 4. Start the requested service with peer URL and port variables injected.
 
 Cycles in `depends_on` must fail validation.
@@ -343,4 +353,3 @@ If LAN or public exposure is added later, it must be explicit and include:
    certificate/trust workflow?
 5. Should public-domain routing use multi-label hostnames or a single
    hash-capped label?
-
